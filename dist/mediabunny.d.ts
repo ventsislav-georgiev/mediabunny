@@ -1665,6 +1665,11 @@ export declare class InputSubtitleTrack extends InputTrack {
      */
     getCues(): AsyncGenerator<SubtitleCue>;
     /**
+     * Returns an async iterator that yields subtitle cues starting from the given timestamp (in seconds).
+     * Uses the MKV CuePoint index for O(log n) seeking instead of scanning from the beginning.
+     */
+    getCuesFrom(timestampSec: number): AsyncGenerator<SubtitleCue>;
+    /**
      * Exports all subtitle cues to text format. If targetFormat is specified,
      * attempts to convert to that format (limited conversion support).
      */

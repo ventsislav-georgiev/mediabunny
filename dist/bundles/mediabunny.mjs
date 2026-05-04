@@ -8433,6 +8433,13 @@ var InputSubtitleTrack = class extends InputTrack {
     return this._backing.getCues();
   }
   /**
+   * Returns an async iterator that yields subtitle cues starting from the given timestamp (in seconds).
+   * Uses the MKV CuePoint index for O(log n) seeking instead of scanning from the beginning.
+   */
+  getCuesFrom(timestampSec) {
+    return this._backing.getCuesFrom(timestampSec);
+  }
+  /**
    * Exports all subtitle cues to text format. If targetFormat is specified,
    * attempts to convert to that format (limited conversion support).
    */
@@ -10935,6 +10942,55 @@ var IsobmffSubtitleTrackBacking = class extends IsobmffTrackBacking {
   }
   getCodecPrivate() {
     return this.internalTrack.info.codecPrivateText;
+  }
+  async *getCuesFrom(timestampSec) {
+    let packet = await this.getPacket(timestampSec, {});
+    while (packet) {
+      let text = "";
+      if (this.internalTrack.info.codec === "webvtt") {
+        const dataBytes = new Uint8Array(packet.data);
+        const dataSlice = new FileSlice2(
+          dataBytes,
+          new DataView(dataBytes.buffer, dataBytes.byteOffset, dataBytes.byteLength),
+          0,
+          0,
+          dataBytes.length
+        );
+        while (dataSlice.remainingLength > 0) {
+          const boxHeader = readBoxHeader(dataSlice);
+          if (!boxHeader) break;
+          if (boxHeader.name === "vttc") {
+            const vttcEnd = dataSlice.filePos + boxHeader.contentSize;
+            while (dataSlice.filePos < vttcEnd && dataSlice.remainingLength > 0) {
+              const innerBox = readBoxHeader(dataSlice);
+              if (!innerBox) break;
+              if (innerBox.name === "payl") {
+                const textBytes = readBytes(dataSlice, innerBox.contentSize);
+                const decoder = new TextDecoder("utf-8");
+                text += decoder.decode(textBytes);
+              } else {
+                dataSlice.skip(innerBox.contentSize);
+              }
+            }
+          } else if (boxHeader.name === "vtte") {
+            dataSlice.skip(boxHeader.contentSize);
+          } else {
+            dataSlice.skip(boxHeader.contentSize);
+          }
+        }
+      } else {
+        const decoder = new TextDecoder("utf-8");
+        text = decoder.decode(packet.data);
+      }
+      if (text) {
+        yield {
+          timestamp: packet.timestamp,
+          duration: packet.duration,
+          text
+        };
+      }
+      packet = await this.getNextPacket(packet, {});
+    }
   }
   async *getCues() {
     let packet = await this.getFirstPacket({});
@@ -13619,6 +13675,19 @@ var MatroskaSubtitleTrackBacking = class extends MatroskaTrackBacking {
   }
   async *getCues() {
     let packet = await this.getFirstPacket({});
+    while (packet) {
+      const decoder = new TextDecoder("utf-8");
+      const text = decoder.decode(packet.data);
+      yield {
+        timestamp: packet.timestamp,
+        duration: packet.duration,
+        text
+      };
+      packet = await this.getNextPacket(packet, {});
+    }
+  }
+  async *getCuesFrom(timestampSec) {
+    let packet = await this.getPacket(timestampSec, {});
     while (packet) {
       const decoder = new TextDecoder("utf-8");
       const text = decoder.decode(packet.data);

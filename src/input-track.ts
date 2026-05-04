@@ -473,6 +473,7 @@ export interface InputSubtitleTrackBacking extends InputTrackBacking {
 	getCodec(): SubtitleCodec | null;
 	getCodecPrivate(): string | null;
 	getCues(): AsyncGenerator<SubtitleCue>;
+	getCuesFrom(timestampSec: number): AsyncGenerator<SubtitleCue>;
 }
 
 /**
@@ -504,6 +505,14 @@ export class InputSubtitleTrack extends InputTrack {
 	 */
 	getCues(): AsyncGenerator<SubtitleCue> {
 		return this._backing.getCues();
+	}
+
+	/**
+	 * Returns an async iterator that yields subtitle cues starting from the given timestamp (in seconds).
+	 * Uses the MKV CuePoint index for O(log n) seeking instead of scanning from the beginning.
+	 */
+	getCuesFrom(timestampSec: number): AsyncGenerator<SubtitleCue> {
+		return this._backing.getCuesFrom(timestampSec);
 	}
 
 	/**

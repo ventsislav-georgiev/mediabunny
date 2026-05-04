@@ -343,6 +343,13 @@ export class InputSubtitleTrack extends InputTrack {
         return this._backing.getCues();
     }
     /**
+     * Returns an async iterator that yields subtitle cues starting from the given timestamp (in seconds).
+     * Uses the MKV CuePoint index for O(log n) seeking instead of scanning from the beginning.
+     */
+    getCuesFrom(timestampSec) {
+        return this._backing.getCuesFrom(timestampSec);
+    }
+    /**
      * Exports all subtitle cues to text format. If targetFormat is specified,
      * attempts to convert to that format (limited conversion support).
      */

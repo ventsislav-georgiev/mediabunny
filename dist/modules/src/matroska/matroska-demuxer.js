@@ -2203,10 +2203,21 @@ class MatroskaSubtitleTrackBacking extends MatroskaTrackBacking {
         return this.internalTrack.info.codecPrivateText;
     }
     async *getCues() {
-        // Use the existing packet reading infrastructure
         let packet = await this.getFirstPacket({});
         while (packet) {
-            // Decode subtitle data as UTF-8 text
+            const decoder = new TextDecoder('utf-8');
+            const text = decoder.decode(packet.data);
+            yield {
+                timestamp: packet.timestamp,
+                duration: packet.duration,
+                text,
+            };
+            packet = await this.getNextPacket(packet, {});
+        }
+    }
+    async *getCuesFrom(timestampSec) {
+        let packet = await this.getPacket(timestampSec, {});
+        while (packet) {
             const decoder = new TextDecoder('utf-8');
             const text = decoder.decode(packet.data);
             yield {
