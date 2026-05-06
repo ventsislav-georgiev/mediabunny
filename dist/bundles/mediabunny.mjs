@@ -12315,6 +12315,7 @@ var MatroskaDemuxer = class extends Demuxer {
                 this.currentTrack.info.codec = "vp9";
               } else if (codecIdWithoutSuffix === CODEC_STRING_MAP.av1) {
                 this.currentTrack.info.codec = "av1";
+                this.currentTrack.info.codecDescription = this.currentTrack.codecPrivate;
               }
               const videoTrack = this.currentTrack;
               const inputTrack = new InputVideoTrack(this.input, new MatroskaVideoTrackBacking(videoTrack));
@@ -21093,6 +21094,7 @@ var ftyp = (details) => {
       // Compatible brands
       ascii("iso5"),
       ascii("iso6"),
+      details.holdsAv1 ? ascii("av01") : [],
       ascii("mp41")
     ]);
   }
@@ -21104,6 +21106,7 @@ var ftyp = (details) => {
     // Compatible brands
     ascii("isom"),
     details.holdsAvc ? ascii("avc1") : [],
+    details.holdsAv1 ? ascii("av01") : [],
     ascii("mp41")
   ]);
 };
@@ -21442,7 +21445,8 @@ var vpcC = (trackData) => {
   ]);
 };
 var av1C = (trackData) => {
-  return box("av1C", generateAv1CodecConfigurationFromCodecString(trackData.info.decoderConfig.codec));
+  const description = trackData.info.decoderConfig.description;
+  return box("av1C", description ? [...toUint8Array(description)] : generateAv1CodecConfigurationFromCodecString(trackData.info.decoderConfig.codec));
 };
 var soundSampleDescription = (compressionType, trackData) => {
   let version = 0;
@@ -23032,6 +23036,7 @@ var IsobmffMuxer2 = class extends Muxer {
   async start() {
     const release = await this.mutex.acquire();
     const holdsAvc = this.output._tracks.some((x) => x.type === "video" && x.source._codec === "avc");
+    const holdsAv1 = this.output._tracks.some((x) => x.type === "video" && x.source._codec === "av1");
     {
       if (this.format._options.onFtyp) {
         this.writer.startTrackingWrites();
@@ -23039,6 +23044,7 @@ var IsobmffMuxer2 = class extends Muxer {
       this.boxWriter.writeBox(ftyp({
         isQuickTime: this.isQuickTime,
         holdsAvc,
+        holdsAv1,
         fragmented: this.isFragmented
       }));
       if (this.format._options.onFtyp) {

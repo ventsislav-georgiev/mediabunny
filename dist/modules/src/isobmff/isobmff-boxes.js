@@ -224,6 +224,7 @@ export const ftyp = (details) => {
             // Compatible brands
             ascii('iso5'),
             ascii('iso6'),
+            details.holdsAv1 ? ascii('av01') : [],
             ascii('mp41'),
         ]);
     }
@@ -233,6 +234,7 @@ export const ftyp = (details) => {
         // Compatible brands
         ascii('isom'),
         details.holdsAvc ? ascii('avc1') : [],
+        details.holdsAv1 ? ascii('av01') : [],
         ascii('mp41'),
     ]);
 };
@@ -548,7 +550,10 @@ export const vpcC = (trackData) => {
 };
 /** AV1 Configuration Box: Provides additional information to the decoder. */
 export const av1C = (trackData) => {
-    return box('av1C', generateAv1CodecConfigurationFromCodecString(trackData.info.decoderConfig.codec));
+    const description = trackData.info.decoderConfig.description;
+    return box('av1C', description
+        ? [...toUint8Array(description)]
+        : generateAv1CodecConfigurationFromCodecString(trackData.info.decoderConfig.codec));
 };
 /** Sound Sample Description Box: Contains information that defines how to interpret sound media data. */
 export const soundSampleDescription = (compressionType, trackData) => {

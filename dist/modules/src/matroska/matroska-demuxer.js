@@ -747,6 +747,7 @@ export class MatroskaDemuxer extends Demuxer {
                             }
                             else if (codecIdWithoutSuffix === CODEC_STRING_MAP.av1) {
                                 this.currentTrack.info.codec = 'av1';
+                                this.currentTrack.info.codecDescription = this.currentTrack.codecPrivate;
                             }
                             const videoTrack = this.currentTrack;
                             const inputTrack = new InputVideoTrack(this.input, new MatroskaVideoTrackBacking(videoTrack));

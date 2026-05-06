@@ -44,6 +44,7 @@ export declare const fullBox: (type: string, version: number, flags: number, con
 export declare const ftyp: (details: {
     isQuickTime: boolean;
     holdsAvc: boolean;
+    holdsAv1: boolean;
     fragmented: boolean;
 }) => Box;
 /** Movie Sample Data Box. Contains the actual frames/samples of the media. */

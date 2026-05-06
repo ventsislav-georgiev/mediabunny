@@ -65,6 +65,7 @@ export class IsobmffMuxer extends Muxer {
     async start() {
         const release = await this.mutex.acquire();
         const holdsAvc = this.output._tracks.some(x => x.type === 'video' && x.source._codec === 'avc');
+        const holdsAv1 = this.output._tracks.some(x => x.type === 'video' && x.source._codec === 'av1');
         // Write the header
         {
             if (this.format._options.onFtyp) {
@@ -73,6 +74,7 @@ export class IsobmffMuxer extends Muxer {
             this.boxWriter.writeBox(ftyp({
                 isQuickTime: this.isQuickTime,
                 holdsAvc: holdsAvc,
+                holdsAv1: holdsAv1,
                 fragmented: this.isFragmented,
             }));
             if (this.format._options.onFtyp) {
