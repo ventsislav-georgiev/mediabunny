@@ -18301,7 +18301,7 @@ var BlobSource = class extends Source {
   }
 };
 var URL_SOURCE_MIN_LOAD_AMOUNT = 0.5 * 2 ** 20;
-var DEFAULT_RETRY_DELAY = (previousAttempts, error, src) => {
+var DEFAULT_RETRY_DELAY = ((previousAttempts, error, src) => {
   const couldBeCorsError = error instanceof Error && (error.message.includes("Failed to fetch") || error.message.includes("Load failed") || error.message.includes("NetworkError when attempting to fetch resource"));
   if (couldBeCorsError) {
     let originOfSrc = null;
@@ -18320,7 +18320,7 @@ var DEFAULT_RETRY_DELAY = (previousAttempts, error, src) => {
     }
   }
   return Math.min(2 ** (previousAttempts - 2), 16);
-};
+});
 var UrlSource = class extends Source {
   /**
    * Creates a new {@link UrlSource} backed by the resource at the specified URL.
