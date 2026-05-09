@@ -3962,6 +3962,27 @@ var extractAv1CodecInfoFromPacket = (packet) => {
   }
   return null;
 };
+var extractAv1SequenceHeaderOBU = (packet) => {
+  for (const { type, data } of iterateAv1PacketObus(packet)) {
+    if (type === 1) {
+      const obuHeader = new Uint8Array(1);
+      obuHeader[0] = 10;
+      const sizeBytes = [];
+      let size = data.length;
+      while (size >= 128) {
+        sizeBytes.push(size & 127 | 128);
+        size >>= 7;
+      }
+      sizeBytes.push(size & 127);
+      const result = new Uint8Array(1 + sizeBytes.length + data.length);
+      result[0] = obuHeader[0];
+      result.set(sizeBytes, 1);
+      result.set(data, 1 + sizeBytes.length);
+      return result;
+    }
+  }
+  return null;
+};
 var parseOpusIdentificationHeader = (bytes2) => {
   const view2 = toDataView(bytes2);
   const outputChannelCount = view2.getUint8(9);
@@ -24475,12 +24496,15 @@ var MatroskaMuxer = class extends Muxer {
         )
       };
     } else if (track.source._codec === "av1") {
+      const av1ConfigHeader = new Uint8Array(
+        generateAv1CodecConfigurationFromCodecString(newTrackData.info.decoderConfig.codec)
+      );
       newTrackData.info.decoderConfig = {
         ...newTrackData.info.decoderConfig,
-        description: new Uint8Array(
-          generateAv1CodecConfigurationFromCodecString(newTrackData.info.decoderConfig.codec)
-        )
+        description: av1ConfigHeader
       };
+      newTrackData.info.av1ConfigHeader = av1ConfigHeader;
+      newTrackData.info.av1SequenceHeaderPending = true;
     }
     this.trackDatas.push(newTrackData);
     this.trackDatas.sort((a, b) => a.track.id - b.track.id);
@@ -24710,6 +24734,24 @@ ${cue.notes ?? ""}`;
       this.createSegment();
     }
     const msTimestamp = Math.round(1e3 * chunk.timestamp);
+    if (trackData.type === "video" && chunk.type === "key") {
+      const videoTrackData = trackData;
+      const av1SequenceHeaderPending = videoTrackData.info.av1SequenceHeaderPending;
+      const av1ConfigHeader = videoTrackData.info.av1ConfigHeader;
+      if (av1SequenceHeaderPending && av1ConfigHeader && videoTrackData.track.source._codec === "av1") {
+        const sequenceHeader = extractAv1SequenceHeaderOBU(chunk.data);
+        if (sequenceHeader) {
+          const completeCodecPrivate = new Uint8Array(av1ConfigHeader.length + sequenceHeader.length);
+          completeCodecPrivate.set(av1ConfigHeader, 0);
+          completeCodecPrivate.set(sequenceHeader, av1ConfigHeader.length);
+          videoTrackData.info.decoderConfig = {
+            ...videoTrackData.info.decoderConfig,
+            description: completeCodecPrivate
+          };
+          videoTrackData.info.av1SequenceHeaderPending = false;
+        }
+      }
+    }
     const keyFrameQueuedEverywhere = this.trackDatas.every((otherTrackData) => {
       if (trackData === otherTrackData) {
         return chunk.type === "key";

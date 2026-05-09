@@ -172,6 +172,12 @@ export declare const iterateAv1PacketObus: (packet: Uint8Array) => Generator<{
  * into the AV1 bitstream.
  */
 export declare const extractAv1CodecInfoFromPacket: (packet: Uint8Array) => Av1CodecInfo | null;
+/**
+ * Extracts the OBU_SEQUENCE_HEADER (type 1) from an AV1 packet.
+ * Returns the complete OBU including the OBU header and payload.
+ * Returns null if no sequence header is found.
+ */
+export declare const extractAv1SequenceHeaderOBU: (packet: Uint8Array) => Uint8Array | null;
 export declare const parseOpusIdentificationHeader: (bytes: Uint8Array) => {
     outputChannelCount: number;
     preSkip: number;

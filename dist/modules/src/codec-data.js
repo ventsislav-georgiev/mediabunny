@@ -1621,6 +1621,44 @@ export const extractAv1CodecInfoFromPacket = (packet) => {
     }
     return null;
 };
+/**
+ * Extracts the OBU_SEQUENCE_HEADER (type 1) from an AV1 packet.
+ * Returns the complete OBU including the OBU header and payload.
+ * Returns null if no sequence header is found.
+ */
+export const extractAv1SequenceHeaderOBU = (packet) => {
+    for (const { type, data } of iterateAv1PacketObus(packet)) {
+        if (type === 1) {
+            // OBU_SEQUENCE_HEADER
+            // We need to reconstruct the OBU with its header.
+            // The OBU header format is:
+            // - 1 bit: forbidden (0)
+            // - 4 bits: obu_type (1 for sequence header)
+            // - 1 bit: obu_extension_flag (0 for sequence header)
+            // - 1 bit: obu_has_size_field (1 for Matroska)
+            // - 1 bit: reserved (0)
+            // = 0x0A (00001010 in binary)
+            // For Matroska, we need to include the size field (LEB128 encoded)
+            const obuHeader = new Uint8Array(1);
+            obuHeader[0] = 0x0A; // forbidden=0, type=1, extension=0, has_size=1, reserved=0
+            // Encode size as LEB128
+            const sizeBytes = [];
+            let size = data.length;
+            while (size >= 0x80) {
+                sizeBytes.push((size & 0x7f) | 0x80);
+                size >>= 7;
+            }
+            sizeBytes.push(size & 0x7f);
+            // Combine: header + size + data
+            const result = new Uint8Array(1 + sizeBytes.length + data.length);
+            result[0] = obuHeader[0];
+            result.set(sizeBytes, 1);
+            result.set(data, 1 + sizeBytes.length);
+            return result;
+        }
+    }
+    return null;
+};
 export const parseOpusIdentificationHeader = (bytes) => {
     const view = toDataView(bytes);
     const outputChannelCount = view.getUint8(9);

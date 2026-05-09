@@ -68,7 +68,7 @@ import { FileSlice } from '../reader';
 import { Muxer } from '../muxer';
 import { Writer } from '../writer';
 import { EncodedPacket } from '../packet';
-import { parseOpusIdentificationHeader } from '../codec-data';
+import { parseOpusIdentificationHeader, extractAv1SequenceHeaderOBU } from '../codec-data';
 import { AttachedFile } from '../metadata';
 
 const MIN_CLUSTER_TIMESTAMP_MS = -(2 ** 15);
@@ -97,6 +97,9 @@ type MatroskaTrackData = {
 		aspectRatio: Rational | null;
 		decoderConfig: VideoDecoderConfig;
 		alphaMode: boolean;
+		// AV1-specific: store config header and sequence header pending state
+		av1ConfigHeader?: Uint8Array;
+		av1SequenceHeaderPending?: boolean;
 	};
 } | {
 	track: OutputAudioTrack;
@@ -789,14 +792,20 @@ export class MatroskaMuxer extends Muxer {
 			};
 		} else if (track.source._codec === 'av1') {
 			// Per https://github.com/ietf-wg-cellar/matroska-specification/blob/master/codec/av1.md, AV1 requires
-			// CodecPrivate to be set, but WebCodecs makes no use of the description field for AV1. Thus, let's derive
-			// it ourselves:
+			// CodecPrivate to be set. We'll store the 4-byte config header now and extract the Sequence Header OBU
+			// from the first keyframe to complete the CodecPrivate.
+			const av1ConfigHeader = new Uint8Array(
+				generateAv1CodecConfigurationFromCodecString(newTrackData.info.decoderConfig.codec),
+			);
+			
 			newTrackData.info.decoderConfig = {
 				...newTrackData.info.decoderConfig,
-				description: new Uint8Array(
-					generateAv1CodecConfigurationFromCodecString(newTrackData.info.decoderConfig.codec),
-				),
+				description: av1ConfigHeader,
 			};
+			
+			// Store config header and mark that we need to extract sequence header from first keyframe
+			(newTrackData.info as any).av1ConfigHeader = av1ConfigHeader;
+			(newTrackData.info as any).av1SequenceHeaderPending = true;
 		}
 
 		this.trackDatas.push(newTrackData);
@@ -1115,6 +1124,33 @@ export class MatroskaMuxer extends Muxer {
 		}
 
 		const msTimestamp = Math.round(1000 * chunk.timestamp);
+
+		// Handle AV1 sequence header extraction on first keyframe
+		if (trackData.type === 'video' && chunk.type === 'key') {
+			const videoTrackData = trackData as MatroskaVideoTrackData;
+			const av1SequenceHeaderPending = (videoTrackData.info as any).av1SequenceHeaderPending;
+			const av1ConfigHeader = (videoTrackData.info as any).av1ConfigHeader;
+			
+			if (av1SequenceHeaderPending && av1ConfigHeader && videoTrackData.track.source._codec === 'av1') {
+				// Try to extract sequence header from the keyframe
+				const sequenceHeader = extractAv1SequenceHeaderOBU(chunk.data);
+				if (sequenceHeader) {
+					// Combine config header with sequence header to form complete CodecPrivate
+					const completeCodecPrivate = new Uint8Array(av1ConfigHeader.length + sequenceHeader.length);
+					completeCodecPrivate.set(av1ConfigHeader, 0);
+					completeCodecPrivate.set(sequenceHeader, av1ConfigHeader.length);
+					
+					// Update the decoder config with the complete CodecPrivate
+					videoTrackData.info.decoderConfig = {
+						...videoTrackData.info.decoderConfig,
+						description: completeCodecPrivate,
+					};
+					
+					// Clear the pending flag
+					(videoTrackData.info as any).av1SequenceHeaderPending = false;
+				}
+			}
+		}
 
 		// We wanna only finalize this cluster (and begin a new one) if we know that each track will be able to
 		// start the new one with a key frame.
