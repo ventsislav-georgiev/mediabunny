@@ -30,6 +30,9 @@ export default tseslint.config(
 			'@typescript-eslint/require-await': 'off',
 			'@stylistic/yield-star-spacing': ['error', { before: false, after: true }],
 			'@typescript-eslint/no-unsafe-enum-comparison': 'off',
+			'@typescript-eslint/no-unsafe-unary-minus': 'off',
+			'@typescript-eslint/no-deprecated': 'error',
+			'@typescript-eslint/consistent-type-exports': 'error',
 		},
 	},
 	{
@@ -44,9 +47,11 @@ export default tseslint.config(
 			'packages/aac-encoder/build',
 			'packages/flac-encoder/dist',
 			'packages/flac-encoder/build',
+			'packages/server/dist',
 			'eslint.config.mjs',
 			'docs/.vitepress/cache',
 			'test/public',
+			'testfiles_temp'
 		]
 	}
 );

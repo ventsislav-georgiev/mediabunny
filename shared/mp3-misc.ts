@@ -6,7 +6,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-export const FRAME_HEADER_SIZE = 4;
+export const MP3_FRAME_HEADER_SIZE = 4;
 export const SAMPLING_RATES = [44100, 48000, 32000];
 export const KILOBIT_RATES = [
 	// lowSamplingFrequency === 0
@@ -30,6 +30,7 @@ export const INFO = 0x496e666f;
 export type Mp3FrameHeader = {
 	totalSize: number;
 	mpegVersionId: number;
+	lowSamplingFrequency: number;
 	layer: number;
 	bitrate: number;
 	frequencyIndex: number;
@@ -57,6 +58,23 @@ export const computeMp3FrameSize = (
 		return Math.floor(144 * bitrate / sampleRate) + padding;
 	} else { // layer === 3
 		return (Math.floor(12 * bitrate / sampleRate) + padding) * 4;
+	}
+};
+
+export const computeAverageMp3FrameSize = (
+	lowSamplingFrequency: number,
+	layer: number,
+	bitrate: number,
+	sampleRate: number,
+) => {
+	if (layer === 0) {
+		return 0; // Not expected that this is hit
+	} else if (layer === 1) {
+		return 144 * bitrate / (sampleRate << lowSamplingFrequency);
+	} else if (layer === 2) {
+		return 144 * bitrate / sampleRate;
+	} else { // layer === 3
+		return (12 * bitrate / sampleRate) * 4;
 	}
 };
 
@@ -104,7 +122,8 @@ export const readMp3FrameHeader = (word: number, remainingBytes: number | null):
 	const layer = (secondByte >> 1) & 0x3;
 
 	const bitrateIndex = (thirdByte >> 4) & 0xf;
-	const frequencyIndex = ((thirdByte >> 2) & 0x3) % 3;
+	const frequencyIndex = ((thirdByte >> 2) & 0x3) % 3; // FFmpeg effectively does % 3 (but in a roundabout way)
+
 	const padding = (thirdByte >> 1) & 0x1;
 
 	const channel = (fourthByte >> 6) & 0x3;
@@ -144,6 +163,7 @@ export const readMp3FrameHeader = (word: number, remainingBytes: number | null):
 		header: {
 			totalSize: frameLength,
 			mpegVersionId,
+			lowSamplingFrequency,
 			layer,
 			bitrate,
 			frequencyIndex,
@@ -186,4 +206,14 @@ export const decodeSynchsafe = (synchsafed: number) => {
 	}
 
 	return unsynchsafed;
+};
+
+export enum XingFlags {
+	FrameCount = 1 << 0,
+	FileSize = 1 << 1,
+	Toc = 1 << 2,
+}
+
+export const getMp3ChannelCount = (channel: number) => {
+	return channel === 3 ? 1 : 2;
 };

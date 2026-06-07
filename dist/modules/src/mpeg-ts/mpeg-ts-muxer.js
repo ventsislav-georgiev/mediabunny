@@ -35,11 +35,11 @@ export class MpegTsMuxer extends Muxer {
         this.adaptationFieldBuffer = new Uint8Array(184);
         this.payloadBuffer = new Uint8Array(184);
         this.format = format;
-        this.writer = output._writer;
-        this.writer.ensureMonotonicity = true;
     }
     async start() {
-        // Nothing to do here
+        const release = await this.mutex.acquire();
+        this.writer = await this.output._getRootWriter(true);
+        release();
     }
     async getMimeType() {
         await this.allTracksKnown.promise;
@@ -74,6 +74,7 @@ export class MpegTsMuxer extends Muxer {
             adtsHeader: null,
             adtsHeaderBitstream: null,
             firstPacketWritten: false,
+            closed: false,
         };
         this.trackDatas.push(newTrackData);
         if (this.allTracksAreKnown()) {
@@ -138,6 +139,7 @@ export class MpegTsMuxer extends Muxer {
             adtsHeader: null,
             adtsHeaderBitstream: null,
             firstPacketWritten: false,
+            closed: false,
         };
         this.trackDatas.push(newTrackData);
         if (this.allTracksAreKnown()) {
@@ -149,14 +151,14 @@ export class MpegTsMuxer extends Muxer {
         const release = await this.mutex.acquire();
         try {
             const trackData = this.getVideoTrackData(track, meta);
-            const timestamp = this.validateAndNormalizeTimestamp(trackData.track, packet.timestamp, packet.type === 'key');
+            this.validateTimestamp(trackData.track, packet.timestamp, packet.type === 'key');
             const preparedData = this.prepareVideoPacket(trackData, packet, meta);
             if (packet.type === 'key') {
                 await this.flushTimestampQueue(trackData);
             }
             trackData.timestampProcessingQueue.push({
                 data: preparedData,
-                presentationTimestamp: timestamp,
+                presentationTimestamp: packet.timestamp,
                 decodeTimestamp: null,
                 isKeyframe: packet.type === 'key',
             });
@@ -169,14 +171,14 @@ export class MpegTsMuxer extends Muxer {
         const release = await this.mutex.acquire();
         try {
             const trackData = this.getAudioTrackData(track, meta);
-            const timestamp = this.validateAndNormalizeTimestamp(trackData.track, packet.timestamp, packet.type === 'key');
+            this.validateTimestamp(trackData.track, packet.timestamp, packet.type === 'key');
             const preparedData = this.prepareAudioPacket(trackData, packet, meta);
             if (packet.type === 'key') {
                 await this.flushTimestampQueue(trackData);
             }
             trackData.timestampProcessingQueue.push({
                 data: preparedData,
-                presentationTimestamp: timestamp,
+                presentationTimestamp: packet.timestamp,
                 decodeTimestamp: null,
                 isKeyframe: packet.type === 'key',
             });
@@ -355,7 +357,7 @@ export class MpegTsMuxer extends Muxer {
             for (const trackData of this.trackDatas) {
                 if (!isFinalCall
                     && trackData.packetQueue.length === 0
-                    && !trackData.track.source._closed) {
+                    && !trackData.closed) {
                     break outer;
                 }
                 if (trackData.packetQueue.length > 0
@@ -523,12 +525,13 @@ export class MpegTsMuxer extends Muxer {
     // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async onTrackClose(track) {
         const release = await this.mutex.acquire();
-        if (this.allTracksAreKnown()) {
-            this.allTracksKnown.resolve();
-        }
         const trackData = this.trackDatas.find(x => x.track === track);
         if (trackData) {
+            trackData.closed = true;
             await this.flushTimestampQueue(trackData, false);
+        }
+        if (this.allTracksAreKnown()) {
+            this.allTracksKnown.resolve();
         }
         await this.interleavePackets();
         release();
@@ -537,6 +540,7 @@ export class MpegTsMuxer extends Muxer {
         const release = await this.mutex.acquire();
         this.allTracksKnown.resolve();
         for (const trackData of this.trackDatas) {
+            trackData.closed = true;
             await this.flushTimestampQueue(trackData, false);
         }
         await this.interleavePackets(true);

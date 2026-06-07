@@ -6,14 +6,14 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 import { parsePcmCodec, PCM_AUDIO_CODECS } from './codec.js';
-import { concatAvcNalUnits, deserializeAvcDecoderConfigurationRecord, determineVideoPacketType, extractNalUnitTypeForAvc, extractNalUnitTypeForHevc, HevcNalUnitType, iterateAvcNalUnits, iterateHevcNalUnits, parseAvcSps, } from './codec-data.js';
+import { AvcNalUnitType, concatAvcNalUnits, deserializeAvcDecoderConfigurationRecord, determineVideoPacketType, extractNalUnitTypeForAvc, extractNalUnitTypeForHevc, HevcNalUnitType, iterateAvcNalUnits, iterateHevcNalUnits, parseAvcSps, sanitizeHevcPacketForChromium, } from './codec-data.js';
 import { customVideoDecoders, customAudioDecoders } from './custom-coder.js';
 import { InputDisposedError } from './input.js';
 import { InputAudioTrack, InputTrack, InputVideoTrack } from './input-track.js';
 import { assert, assertNever, CallSerializer, getInt24, getUint24, insertSorted, isChromium, isFirefox, isNumber, isWebKit, last, mapAsyncGenerator, promiseWithResolvers, toAsyncIterator, toDataView, toUint8Array, validateAnyIterable, } from './misc.js';
 import { EncodedPacket } from './packet.js';
 import { fromAlaw, fromUlaw } from './pcm.js';
-import { AudioSample, clampCropRectangle, validateCropRectangle, VideoSample } from './sample.js';
+import { AudioSample, clampCropRectangle, validateCropRectangle, VideoSample, } from './sample.js';
 const validatePacketRetrievalOptions = (options) => {
     if (!options || typeof options !== 'object') {
         throw new TypeError('options must be an object.');
@@ -26,6 +26,9 @@ const validatePacketRetrievalOptions = (options) => {
     }
     if (options.verifyKeyPackets && options.metadataOnly) {
         throw new TypeError('options.verifyKeyPackets and options.metadataOnly cannot be enabled together.');
+    }
+    if (options.skipLiveWait !== undefined && typeof options.skipLiveWait !== 'boolean') {
+        throw new TypeError('options.skipLiveWait, when defined, must be a boolean.');
     }
 };
 const validateTimestamp = (timestamp) => {
@@ -66,14 +69,27 @@ export class EncodedPacketSink {
     }
     /**
      * Retrieves the track's first packet (in decode order), or null if it has no packets. The first packet is very
-     * likely to be a key packet.
+     * likely to be a key packet, but it doesn't have to be.
      */
-    getFirstPacket(options = {}) {
+    async getFirstPacket(options = {}) {
         validatePacketRetrievalOptions(options);
         if (this._track.input._disposed) {
             throw new InputDisposedError();
         }
         return maybeFixPacketType(this._track, this._track._backing.getFirstPacket(options), options);
+    }
+    /** Retrieves the track's first key packet (in decode order), or null if it has no key packets. */
+    async getFirstKeyPacket(options = {}) {
+        validatePacketRetrievalOptions(options);
+        const firstPacket = await this.getFirstPacket(options);
+        if (!firstPacket) {
+            return null;
+        }
+        if (firstPacket.type === 'key') {
+            // Great
+            return firstPacket;
+        }
+        return this.getNextKeyPacket(firstPacket, options);
     }
     /**
      * Retrieves the packet corresponding to the given timestamp, in seconds. More specifically, returns the last packet
@@ -83,7 +99,7 @@ export class EncodedPacketSink {
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
      */
-    getPacket(timestamp, options = {}) {
+    async getPacket(timestamp, options = {}) {
         validateTimestamp(timestamp);
         validatePacketRetrievalOptions(options);
         if (this._track.input._disposed) {
@@ -95,7 +111,7 @@ export class EncodedPacketSink {
      * Retrieves the packet following the given packet (in decode order), or null if the given packet is the
      * last packet.
      */
-    getNextPacket(packet, options = {}) {
+    async getNextPacket(packet, options = {}) {
         if (!(packet instanceof EncodedPacket)) {
             throw new TypeError('packet must be an EncodedPacket.');
         }
@@ -133,7 +149,7 @@ export class EncodedPacketSink {
         const determinedType = await this._track.determinePacketType(packet);
         if (determinedType === 'delta') {
             // Try returning the previous key packet (in hopes that it's actually a key packet)
-            return this.getKeyPacket(packet.timestamp - 1 / this._track.timeResolution, options);
+            return this.getKeyPacket(packet.timestamp - 1 / await this._track.getTimeResolution(), options);
         }
         return packet;
     }
@@ -171,7 +187,7 @@ export class EncodedPacketSink {
      * method will intelligently preload packets based on the speed of the consumer.
      *
      * @param startPacket - (optional) The packet from which iteration should begin. This packet will also be yielded.
-     * @param endTimestamp - (optional) The timestamp at which iteration should end. This packet will _not_ be yielded.
+     * @param endPacket - (optional) The packet at which iteration should end. This packet will _not_ be yielded.
      */
     packets(startPacket, endPacket, options = {}) {
         if (startPacket !== undefined && !(startPacket instanceof EncodedPacket)) {
@@ -283,7 +299,7 @@ class DecoderWrapper {
  */
 export class BaseMediaSampleSink {
     /** @internal */
-    mediaSamplesInRange(startTimestamp = 0, endTimestamp = Infinity) {
+    mediaSamplesInRange(startTimestamp = -Infinity, endTimestamp = Infinity, options) {
         validateTimestamp(startTimestamp);
         validateTimestamp(endTimestamp);
         const sampleQueue = [];
@@ -298,6 +314,11 @@ export class BaseMediaSampleSink {
         // method but instead in a different context. This error should not go unnoticed and must be bubbled up to
         // the consumer.
         let outOfBandError = null;
+        const packetRetrievalOptions = {
+            ...options,
+            verifyKeyPackets: true,
+            metadataOnly: false,
+        };
         // The following is the "pump" process that keeps pumping packets into the decoder
         (async () => {
             const decoder = await this._createDecoder((sample) => {
@@ -338,8 +359,8 @@ export class BaseMediaSampleSink {
                 }
             });
             const packetSink = this._createPacketSink();
-            const keyPacket = await packetSink.getKeyPacket(startTimestamp, { verifyKeyPackets: true })
-                ?? await packetSink.getFirstPacket();
+            const keyPacket = await packetSink.getKeyPacket(startTimestamp, packetRetrievalOptions)
+                ?? await packetSink.getFirstKeyPacket(packetRetrievalOptions);
             let currentPacket = keyPacket;
             // B-frames make it exceedingly difficult to properly define an upper bound for packet iteration if an end
             // timestamp is set, so we just don't do it. The case that makes it especially tricky is when the frames
@@ -348,7 +369,7 @@ export class BaseMediaSampleSink {
             // decoder work at the end of the range, but the added correctness and reliability makes this tradeoff worth
             // it.
             const endPacket = undefined;
-            const packets = packetSink.packets(keyPacket ?? undefined, endPacket);
+            const packets = packetSink.packets(keyPacket ?? undefined, endPacket, packetRetrievalOptions);
             await packets.next(); // Skip the start packet as we already have it
             while (currentPacket && !ended && !this._track.input._disposed) {
                 const maxQueueSize = computeMaxQueueSize(sampleQueue.length);
@@ -431,7 +452,7 @@ export class BaseMediaSampleSink {
         };
     }
     /** @internal */
-    mediaSamplesAtTimestamps(timestamps) {
+    mediaSamplesAtTimestamps(timestamps, options) {
         validateAnyIterable(timestamps);
         const timestampIterator = toAsyncIterator(timestamps);
         const timestampsOfInterest = [];
@@ -448,6 +469,11 @@ export class BaseMediaSampleSink {
             sampleQueue.push(sample);
             onQueueNotEmpty();
             ({ promise: queueNotEmpty, resolve: onQueueNotEmpty } = promiseWithResolvers());
+        };
+        const retrievalOptions = {
+            ...options,
+            verifyKeyPackets: true,
+            metadataOnly: false,
         };
         // The following is the "pump" process that keeps pumping packets into the decoder
         (async () => {
@@ -499,7 +525,7 @@ export class BaseMediaSampleSink {
                     if (terminated) {
                         break;
                     }
-                    const nextPacket = await packetSink.getNextPacket(currentPacket);
+                    const nextPacket = await packetSink.getNextPacket(currentPacket, retrievalOptions);
                     assert(nextPacket);
                     decoder.decode(nextPacket);
                     currentPacket = nextPacket;
@@ -520,8 +546,8 @@ export class BaseMediaSampleSink {
                 if (terminated || this._track.input._disposed) {
                     break;
                 }
-                const targetPacket = await packetSink.getPacket(timestamp);
-                const keyPacket = targetPacket && await packetSink.getKeyPacket(timestamp, { verifyKeyPackets: true });
+                const targetPacket = await packetSink.getPacket(timestamp, retrievalOptions);
+                const keyPacket = targetPacket && await packetSink.getKeyPacket(timestamp, retrievalOptions);
                 if (!keyPacket) {
                     if (maxSequenceNumber !== -1) {
                         await decodePackets();
@@ -636,13 +662,13 @@ class VideoDecoderWrapper extends DecoderWrapper {
         this.colorQueue = [];
         this.alphaQueue = [];
         this.merger = null;
-        this.mergerCreationFailed = false;
         this.decodedAlphaChunkCount = 0;
         this.alphaDecoderQueueSize = 0;
         /** Each value is the number of decoded alpha chunks at which a null alpha frame should be added. */
         this.nullAlphaFrameQueue = [];
         this.currentAlphaPacketIndex = 0;
         this.alphaRaslSkipped = false; // For HEVC stuff
+        this.frameHandlerSerializer = new CallSerializer();
         const MatchingCustomDecoder = customVideoDecoders.find(x => x.supports(codec, decoderConfig));
         if (MatchingCustomDecoder) {
             // @ts-expect-error "Can't create instance of abstract class 🤓"
@@ -662,15 +688,17 @@ class VideoDecoderWrapper extends DecoderWrapper {
         }
         else {
             const colorHandler = (frame) => {
-                if (this.alphaQueue.length > 0) {
-                    // Even when no alpha data is present (most of the time), there will be nulls in this queue
-                    const alphaFrame = this.alphaQueue.shift();
-                    assert(alphaFrame !== undefined);
-                    this.mergeAlpha(frame, alphaFrame);
-                }
-                else {
-                    this.colorQueue.push(frame);
-                }
+                this.frameHandlerSerializer.call(async () => {
+                    if (this.alphaQueue.length > 0) {
+                        // Even when no alpha data is present (most of the time), there will be nulls in this queue
+                        const alphaFrame = this.alphaQueue.shift();
+                        assert(alphaFrame !== undefined);
+                        await this.mergeAlpha(frame, alphaFrame);
+                    }
+                    else {
+                        this.colorQueue.push(frame);
+                    }
+                }).catch((error) => this.onError(error));
             };
             if (codec === 'avc' && this.decoderConfig.description && isChromium()) {
                 // Chromium has/had a bug with playing interlaced AVC (https://issues.chromium.org/issues/456919096)
@@ -732,18 +760,33 @@ class VideoDecoderWrapper extends DecoderWrapper {
             if (!isWebKit()) {
                 insertSorted(this.inputTimestamps, packet.timestamp, x => x);
             }
-            // Workaround for https://issues.chromium.org/issues/470109459
-            if (isChromium() && this.currentPacketIndex === 0 && this.codec === 'avc') {
-                const filteredNalUnits = [];
-                for (const loc of iterateAvcNalUnits(packet.data, this.decoderConfig)) {
-                    const type = extractNalUnitTypeForAvc(packet.data[loc.offset]);
-                    // These trip up Chromium's key frame detection, so let's strip them
-                    if (!(type >= 20 && type <= 31)) {
-                        filteredNalUnits.push(packet.data.subarray(loc.offset, loc.offset + loc.length));
+            if (isChromium() && this.currentPacketIndex === 0) {
+                if (this.codec === 'avc') {
+                    // Workaround for https://issues.chromium.org/issues/470109459
+                    const filteredNalUnits = [];
+                    for (const loc of iterateAvcNalUnits(packet.data, this.decoderConfig)) {
+                        const type = extractNalUnitTypeForAvc(packet.data[loc.offset]);
+                        if (type === AvcNalUnitType.AUD) {
+                            // If packets contain an AUD and have NALUs before it, this trips up Chromium's key frame
+                            // detector. Clear the NALUs if an AUD is encountered.
+                            // https://github.com/Vanilagy/mediabunny/issues/396
+                            filteredNalUnits.length = 0;
+                        }
+                        // These trip up Chromium's key frame detection, so let's strip them
+                        if (!(type >= 20 && type <= 31)) {
+                            filteredNalUnits.push(packet.data.subarray(loc.offset, loc.offset + loc.length));
+                        }
+                    }
+                    const newData = concatAvcNalUnits(filteredNalUnits, this.decoderConfig);
+                    packet = new EncodedPacket(newData, packet.type, packet.timestamp, packet.duration);
+                }
+                else if (this.codec === 'hevc') {
+                    // Workaround for https://issues.chromium.org/issues/507611247
+                    const sanitizedData = sanitizeHevcPacketForChromium(packet.data, this.decoderConfig);
+                    if (sanitizedData) {
+                        packet = new EncodedPacket(sanitizedData, packet.type, packet.timestamp, packet.duration);
                     }
                 }
-                const newData = concatAvcNalUnits(filteredNalUnits, this.decoderConfig);
-                packet = new EncodedPacket(newData, packet.type, packet.timestamp, packet.duration);
             }
             this.decoder.decode(packet.toEncodedVideoChunk());
             this.decodeAlphaData(packet);
@@ -751,48 +794,42 @@ class VideoDecoderWrapper extends DecoderWrapper {
         this.currentPacketIndex++;
     }
     decodeAlphaData(packet) {
-        if (!packet.sideData.alpha || this.mergerCreationFailed) {
+        if (!packet.sideData.alpha) {
             // No alpha side data in the packet, most common case
             this.pushNullAlphaFrame();
             return;
         }
         if (!this.merger) {
-            try {
-                this.merger = new ColorAlphaMerger();
-            }
-            catch (error) {
-                console.error('Due to an error, only color data will be decoded.', error);
-                this.mergerCreationFailed = true;
-                this.decodeAlphaData(packet); // Go again
-                return;
-            }
+            this.merger = new ColorAlphaMerger();
         }
         // Check if we need to set up the alpha decoder
         if (!this.alphaDecoder) {
             const alphaHandler = (frame) => {
-                this.alphaDecoderQueueSize--;
-                if (this.colorQueue.length > 0) {
-                    const colorFrame = this.colorQueue.shift();
-                    assert(colorFrame !== undefined);
-                    this.mergeAlpha(colorFrame, frame);
-                }
-                else {
-                    this.alphaQueue.push(frame);
-                }
-                // Check if any null frames have been queued for this point
-                this.decodedAlphaChunkCount++;
-                while (this.nullAlphaFrameQueue.length > 0
-                    && this.nullAlphaFrameQueue[0] === this.decodedAlphaChunkCount) {
-                    this.nullAlphaFrameQueue.shift();
+                this.frameHandlerSerializer.call(async () => {
                     if (this.colorQueue.length > 0) {
                         const colorFrame = this.colorQueue.shift();
                         assert(colorFrame !== undefined);
-                        this.mergeAlpha(colorFrame, null);
+                        await this.mergeAlpha(colorFrame, frame);
                     }
                     else {
-                        this.alphaQueue.push(null);
+                        this.alphaQueue.push(frame);
                     }
-                }
+                    // Check if any null frames have been queued for this point
+                    this.decodedAlphaChunkCount++;
+                    while (this.nullAlphaFrameQueue.length > 0
+                        && this.nullAlphaFrameQueue[0] === this.decodedAlphaChunkCount) {
+                        this.nullAlphaFrameQueue.shift();
+                        if (this.colorQueue.length > 0) {
+                            const colorFrame = this.colorQueue.shift();
+                            assert(colorFrame !== undefined);
+                            await this.mergeAlpha(colorFrame, null);
+                        }
+                        else {
+                            this.alphaQueue.push(null);
+                        }
+                    }
+                    this.alphaDecoderQueueSize--;
+                }).catch((error) => this.onError(error));
             };
             const stack = new Error('Decoding error').stack;
             this.alphaDecoder = new VideoDecoder({
@@ -899,7 +936,7 @@ class VideoDecoderWrapper extends DecoderWrapper {
         sample.setRotation(this.rotation);
         this.onSample(sample);
     }
-    mergeAlpha(color, alpha) {
+    async mergeAlpha(color, alpha) {
         if (!alpha) {
             // Nothing needs to be merged
             const finalSample = new VideoSample(color);
@@ -907,13 +944,8 @@ class VideoDecoderWrapper extends DecoderWrapper {
             return;
         }
         assert(this.merger);
-        this.merger.update(color, alpha);
-        color.close();
-        alpha.close();
-        const finalFrame = new VideoFrame(this.merger.canvas, {
-            timestamp: color.timestamp,
-            duration: color.duration ?? undefined,
-        });
+        // The merger takes ownership of the frames, so no need to close them ourselves
+        const finalFrame = await this.merger.update(color, alpha);
         const finalSample = new VideoSample(finalFrame);
         this.sampleHandler(finalSample);
     }
@@ -927,6 +959,7 @@ class VideoDecoderWrapper extends DecoderWrapper {
                 this.decoder.flush(),
                 this.alphaDecoder?.flush(),
             ]);
+            await this.frameHandlerSerializer.currentPromise;
             this.colorQueue.forEach(x => x.close());
             this.colorQueue.length = 0;
             this.alphaQueue.forEach(x => x?.close());
@@ -967,33 +1000,66 @@ class VideoDecoderWrapper extends DecoderWrapper {
         this.sampleQueue.length = 0;
     }
 }
+let mergerGpuUnavailable = false;
 /** Utility class that merges together color and alpha information using simple WebGL 2 shaders. */
-class ColorAlphaMerger {
+export class ColorAlphaMerger {
     constructor() {
-        // Canvas will be resized later
-        if (typeof OffscreenCanvas !== 'undefined') {
-            // Prefer OffscreenCanvas for Worker environments
-            this.canvas = new OffscreenCanvas(300, 150);
+        this.canvas = null;
+        this.gl = null;
+        this.program = null;
+        this.vao = null;
+        this.colorTexture = null;
+        this.alphaTexture = null;
+        this.worker = null;
+        this.pendingRequests = new Map();
+        this.nextRequestId = 0;
+        const canMakeCanvas = typeof OffscreenCanvas !== 'undefined'
+            // eslint-disable-next-line @typescript-eslint/no-deprecated
+            || (typeof document !== 'undefined' && typeof document.createElement === 'function');
+        if (!ColorAlphaMerger.forceCpu && canMakeCanvas && !mergerGpuUnavailable) {
+            // Try the GPU path. If anything goes wrong, we silently fall back to the CPU path.
+            try {
+                // Canvas will be resized later
+                if (typeof OffscreenCanvas !== 'undefined') {
+                    // Prefer OffscreenCanvas for Worker environments
+                    this.canvas = new OffscreenCanvas(300, 150);
+                }
+                else {
+                    this.canvas = document.createElement('canvas');
+                }
+                const gl = this.canvas.getContext('webgl2', {
+                    premultipliedAlpha: false,
+                }); // Casting because of some TypeScript weirdness
+                if (!gl) {
+                    throw new Error('Couldn\'t acquire WebGL 2 context.');
+                }
+                this.gl = gl;
+                this.program = this.createProgram();
+                this.vao = this.createVAO();
+                this.colorTexture = this.createTexture();
+                this.alphaTexture = this.createTexture();
+                this.gl.useProgram(this.program);
+                this.gl.uniform1i(this.gl.getUniformLocation(this.program, 'u_colorTexture'), 0);
+                this.gl.uniform1i(this.gl.getUniformLocation(this.program, 'u_alphaTexture'), 1);
+            }
+            catch (error) {
+                this.gl = null;
+                this.canvas = null;
+                mergerGpuUnavailable = true;
+                console.warn('Falling back to CPU for color/alpha merging.', error);
+            }
+        }
+    }
+    async update(color, alpha) {
+        if (this.gl) {
+            return this.updateGpu(color, alpha);
         }
         else {
-            this.canvas = document.createElement('canvas');
+            return this.updateCpu(color, alpha);
         }
-        const gl = this.canvas.getContext('webgl2', {
-            premultipliedAlpha: false,
-        }); // Casting because of some TypeScript weirdness
-        if (!gl) {
-            throw new Error('Couldn\'t acquire WebGL 2 context.');
-        }
-        this.gl = gl;
-        this.program = this.createProgram();
-        this.vao = this.createVAO();
-        this.colorTexture = this.createTexture();
-        this.alphaTexture = this.createTexture();
-        this.gl.useProgram(this.program);
-        this.gl.uniform1i(this.gl.getUniformLocation(this.program, 'u_colorTexture'), 0);
-        this.gl.uniform1i(this.gl.getUniformLocation(this.program, 'u_alphaTexture'), 1);
     }
     createProgram() {
+        assert(this.gl);
         const vertexShader = this.createShader(this.gl.VERTEX_SHADER, `#version 300 es
 			in vec2 a_position;
 			in vec2 a_texCoord;
@@ -1025,12 +1091,15 @@ class ColorAlphaMerger {
         return program;
     }
     createShader(type, source) {
+        assert(this.gl);
         const shader = this.gl.createShader(type);
         this.gl.shaderSource(shader, source);
         this.gl.compileShader(shader);
         return shader;
     }
     createVAO() {
+        assert(this.gl);
+        assert(this.program);
         const vao = this.gl.createVertexArray();
         this.gl.bindVertexArray(vao);
         const vertices = new Float32Array([
@@ -1051,6 +1120,7 @@ class ColorAlphaMerger {
         return vao;
     }
     createTexture() {
+        assert(this.gl);
         const texture = this.gl.createTexture();
         this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
         this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
@@ -1059,7 +1129,9 @@ class ColorAlphaMerger {
         this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
         return texture;
     }
-    update(color, alpha) {
+    updateGpu(color, alpha) {
+        assert(this.gl);
+        assert(this.canvas);
         if (color.displayWidth !== this.canvas.width || color.displayHeight !== this.canvas.height) {
             this.canvas.width = color.displayWidth;
             this.canvas.height = color.displayHeight;
@@ -1074,12 +1146,233 @@ class ColorAlphaMerger {
         this.gl.clear(this.gl.COLOR_BUFFER_BIT);
         this.gl.bindVertexArray(this.vao);
         this.gl.drawArrays(this.gl.TRIANGLE_STRIP, 0, 4);
+        const finalFrame = new VideoFrame(this.canvas, {
+            timestamp: color.timestamp,
+            duration: color.duration ?? undefined,
+        });
+        color.close();
+        alpha.close();
+        return finalFrame;
+    }
+    updateCpu(color, alpha) {
+        if (!this.worker) {
+            const blob = new Blob([`(${colorAlphaMergerWorkerCode.toString()})()`], { type: 'application/javascript' });
+            const url = URL.createObjectURL(blob);
+            this.worker = new Worker(url);
+            URL.revokeObjectURL(url);
+            this.worker.addEventListener('message', (event) => {
+                const data = event.data;
+                const pending = this.pendingRequests.get(data.id);
+                if (!pending) {
+                    return;
+                }
+                this.pendingRequests.delete(data.id);
+                if ('error' in data) {
+                    pending.reject(new Error(data.error));
+                }
+                else {
+                    pending.resolve(data.frame);
+                }
+            });
+            this.worker.addEventListener('error', (event) => {
+                const error = new Error(event.message || 'Color/alpha merge worker error.');
+                for (const pending of this.pendingRequests.values()) {
+                    pending.reject(error);
+                }
+                this.pendingRequests.clear();
+            });
+        }
+        const id = this.nextRequestId++;
+        const pending = promiseWithResolvers();
+        this.pendingRequests.set(id, pending);
+        this.worker.postMessage({ id, color, alpha }, { transfer: [color, alpha] });
+        return pending.promise;
     }
     close() {
-        this.gl.getExtension('WEBGL_lose_context')?.loseContext();
+        this.gl?.getExtension('WEBGL_lose_context')?.loseContext();
         this.gl = null;
+        this.canvas = null;
+        this.worker?.terminate();
+        this.worker = null;
+        const error = new Error('Color/alpha merger closed.');
+        for (const pending of this.pendingRequests.values()) {
+            pending.reject(error);
+        }
+        this.pendingRequests.clear();
     }
 }
+ColorAlphaMerger.forceCpu = true;
+const colorAlphaMergerWorkerCode = () => {
+    // These buffers are reused across frames as long as the size matches, since consecutive frames usually share
+    // dimensions
+    let cpuAlphaBuffer = null;
+    let cpuColorBuffer = null;
+    // Serialize execution internally so concurrent requests don't race on the shared cpu*Buffer state.
+    let chain = Promise.resolve();
+    self.addEventListener('message', (event) => {
+        const { id, color, alpha } = event.data;
+        chain = chain.then(async () => {
+            try {
+                const frame = await merge(color, alpha);
+                self.postMessage({ id, frame }, { transfer: [frame] });
+            }
+            catch (error) {
+                self.postMessage({ id, error: error.message });
+            }
+            finally {
+                // We took ownership of the inputs via transfer; close them now that the merge (or its error) is done.
+                color.close();
+                alpha.close();
+            }
+        });
+    });
+    const merge = async (color, alpha) => {
+        const format = color.format;
+        const alphaFormat = alpha.format;
+        if (!format || !alphaFormat) {
+            throw new Error('CPU color/alpha merging requires a known VideoFrame format.');
+        }
+        // The alpha frame must have the same bit depth as the color frame
+        const colorIs10 = format.includes('P10');
+        const colorIs12 = format.includes('P12');
+        const alphaIs10 = alphaFormat.includes('P10');
+        const alphaIs12 = alphaFormat.includes('P12');
+        if (alphaIs10 !== colorIs10 || alphaIs12 !== colorIs12) {
+            throw new Error(`CPU color/alpha merging requires the alpha frame to have the same bit depth as the color frame`
+                + ` (color: '${format}', alpha: '${alphaFormat}').`);
+        }
+        const width = color.codedWidth;
+        const height = color.codedHeight;
+        if (format === 'RGBX' || format === 'RGBA' || format === 'BGRX' || format === 'BGRA') {
+            return await mergeInterleavedRgba(color, alpha, width, height, format);
+        }
+        else if (format === 'I420' || format === 'I420P10' || format === 'I420P12'
+            || format === 'I422' || format === 'I422P10' || format === 'I422P12'
+            || format === 'I444' || format === 'I444P10' || format === 'I444P12') {
+            return await mergePlanarYuv(color, alpha, width, height, format);
+        }
+        else if (format === 'NV12') {
+            return await mergeNv12(color, alpha, width, height);
+        }
+        throw new Error(`CPU color/alpha merging does not support format '${format}'.`);
+    };
+    const mergeInterleavedRgba = async (color, alpha, width, height, format) => {
+        const pixelCount = width * height;
+        const output = new Uint8Array(pixelCount * 4);
+        // Color goes straight into the output buffer via copyTo, no intermediate copy needed
+        await color.copyTo(output);
+        // And now add the alpha data
+        const alphaY = await readAlpha(alpha, width, height, 1);
+        for (let i = 0, j = 3; i < pixelCount; i++, j += 4) {
+            output[j] = alphaY[i];
+        }
+        const outputFormat = (format === 'RGBX' || format === 'RGBA') ? 'RGBA' : 'BGRA';
+        const init = {
+            format: outputFormat,
+            codedWidth: width,
+            codedHeight: height,
+            timestamp: color.timestamp,
+            duration: color.duration ?? undefined,
+            transfer: [output.buffer],
+        };
+        return new VideoFrame(output, init);
+    };
+    const mergePlanarYuv = async (color, alpha, width, height, format) => {
+        const is10 = format.includes('P10');
+        const is12 = format.includes('P12');
+        const bytesPerSample = (is10 || is12) ? 2 : 1;
+        let chromaW;
+        let chromaH;
+        if (format.startsWith('I420')) {
+            chromaW = Math.ceil(width / 2);
+            chromaH = Math.ceil(height / 2);
+        }
+        else if (format.startsWith('I422')) {
+            chromaW = Math.ceil(width / 2);
+            chromaH = height;
+        }
+        else {
+            chromaW = width;
+            chromaH = height;
+        }
+        const ySamples = width * height;
+        const uvSamples = chromaW * chromaH;
+        const yBytes = ySamples * bytesPerSample;
+        const uvBytes = uvSamples * bytesPerSample;
+        const aBytes = ySamples * bytesPerSample;
+        const outputBytes = yBytes + 2 * uvBytes + aBytes;
+        const output = new Uint8Array(outputBytes);
+        // Write color planes directly into the output buffer via copyTo, no intermediate copy
+        await color.copyTo(output);
+        const alphaY = await readAlpha(alpha, width, height, bytesPerSample);
+        const aOffset = yBytes + 2 * uvBytes;
+        output.set(alphaY, aOffset);
+        const outputFormat = (format.slice(0, 4) + 'A' + format.slice(4));
+        const init = {
+            format: outputFormat,
+            codedWidth: width,
+            codedHeight: height,
+            timestamp: color.timestamp,
+            duration: color.duration ?? undefined,
+            transfer: [output.buffer],
+        };
+        return new VideoFrame(output, init);
+    };
+    const mergeNv12 = async (color, alpha, width, height) => {
+        const ySize = width * height;
+        const chromaW = Math.ceil(width / 2);
+        const chromaH = Math.ceil(height / 2);
+        const uvSize = chromaW * chromaH;
+        const sourceSize = color.allocationSize();
+        if (!cpuColorBuffer || cpuColorBuffer.byteLength !== sourceSize) {
+            cpuColorBuffer = new Uint8Array(sourceSize);
+        }
+        await color.copyTo(cpuColorBuffer);
+        const output = new Uint8Array(ySize + 2 * uvSize + ySize);
+        // Y plane copies straight over
+        output.set(cpuColorBuffer.subarray(0, ySize), 0);
+        // Deinterleave the UV plane into separate U and V planes
+        const uOffset = ySize;
+        const vOffset = ySize + uvSize;
+        const uvStart = ySize;
+        for (let i = 0; i < uvSize; i++) {
+            output[uOffset + i] = cpuColorBuffer[uvStart + i * 2];
+            output[vOffset + i] = cpuColorBuffer[uvStart + i * 2 + 1];
+        }
+        const alphaY = await readAlpha(alpha, width, height, 1);
+        output.set(alphaY, ySize + 2 * uvSize);
+        const init = {
+            format: 'I420A',
+            codedWidth: width,
+            codedHeight: height,
+            timestamp: color.timestamp,
+            duration: color.duration ?? undefined,
+            transfer: [output.buffer],
+        };
+        return new VideoFrame(output, init);
+    };
+    const readAlpha = async (alpha, width, height, bytesPerSample) => {
+        const size = alpha.allocationSize();
+        if (!cpuAlphaBuffer || cpuAlphaBuffer.byteLength !== size) {
+            cpuAlphaBuffer = new Uint8Array(size);
+        }
+        await alpha.copyTo(cpuAlphaBuffer);
+        const format = alpha.format;
+        if (format === 'RGBA' || format === 'BGRA' || format === 'RGBX' || format === 'BGRX') {
+            // Pack alpha data tightly. Assume alpha is stored in RGB, so sample just from R for simplicity.
+            const rOffset = (format === 'RGBA' || format === 'RGBX') ? 0 : 2;
+            const pixelCount = width * height;
+            for (let i = 0; i < pixelCount; i++) {
+                cpuAlphaBuffer[i] = cpuAlphaBuffer[i * 4 + rOffset];
+            }
+            return cpuAlphaBuffer.subarray(0, pixelCount);
+        }
+        else {
+            // For Y-plane-first formats (I*** and NV12), the leading width*height samples are the Y plane
+            return cpuAlphaBuffer.subarray(0, width * height * bytesPerSample);
+        }
+    };
+};
 /**
  * A sink that retrieves decoded video samples (video frames) from a video track.
  * @group Media sinks
@@ -1100,10 +1393,10 @@ export class VideoSampleSink extends BaseMediaSampleSink {
             throw new Error('This video track cannot be decoded by this browser. Make sure to check decodability before using'
                 + ' a track.');
         }
-        const codec = this._track.codec;
-        const rotation = this._track.rotation;
+        const codec = await this._track.getCodec();
+        const rotation = await this._track.getRotation();
         const decoderConfig = await this._track.getDecoderConfig();
-        const timeResolution = this._track.timeResolution;
+        const timeResolution = await this._track.getTimeResolution();
         assert(codec && decoderConfig);
         return new VideoDecoderWrapper(onSample, onError, codec, decoderConfig, rotation, timeResolution);
     }
@@ -1117,10 +1410,11 @@ export class VideoSampleSink extends BaseMediaSampleSink {
      * Returns null if the timestamp is before the track's first timestamp.
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    async getSample(timestamp) {
+    async getSample(timestamp, options = {}) {
         validateTimestamp(timestamp);
-        for await (const sample of this.mediaSamplesAtTimestamps([timestamp])) {
+        for await (const sample of this.mediaSamplesAtTimestamps([timestamp], options)) {
             return sample;
         }
         throw new Error('Internal error: Iterator returned nothing.');
@@ -1131,9 +1425,10 @@ export class VideoSampleSink extends BaseMediaSampleSink {
      *
      * @param startTimestamp - The timestamp in seconds at which to start yielding samples (inclusive).
      * @param endTimestamp - The timestamp in seconds at which to stop yielding samples (exclusive).
+     * @param options - Options used for the underlying packet retrieval.
      */
-    samples(startTimestamp = 0, endTimestamp = Infinity) {
-        return this.mediaSamplesInRange(startTimestamp, endTimestamp);
+    samples(startTimestamp, endTimestamp, options = {}) {
+        return this.mediaSamplesInRange(startTimestamp, endTimestamp, options);
     }
     /**
      * Creates an async iterator that yields a video sample (frame) for each timestamp in the argument. This method
@@ -1141,10 +1436,14 @@ export class VideoSampleSink extends BaseMediaSampleSink {
      * once, and is therefore more efficient than manually getting the sample for every timestamp. The iterator may
      * yield null if no frame is available for a given timestamp.
      *
+     * This method is good for sparse access of media data. If you want primarily sequential media access, prefer
+     * {@link VideoSampleSink.samples} instead.
+     *
      * @param timestamps - An iterable or async iterable of timestamps in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    samplesAtTimestamps(timestamps) {
-        return this.mediaSamplesAtTimestamps(timestamps);
+    samplesAtTimestamps(timestamps, options = {}) {
+        return this.mediaSamplesAtTimestamps(timestamps, options);
     }
 }
 /**
@@ -1160,6 +1459,10 @@ export class VideoSampleSink extends BaseMediaSampleSink {
 export class CanvasSink {
     /** Creates a new {@link CanvasSink} for the given {@link InputVideoTrack}. */
     constructor(videoTrack, options = {}) {
+        /** @internal */
+        this._rotation = 0;
+        /** @internal */
+        this._initPromise = null;
         /** @internal */
         this._nextCanvasIndex = 0;
         if (!(videoTrack instanceof InputVideoTrack)) {
@@ -1195,54 +1498,66 @@ export class CanvasSink {
             && (typeof options.poolSize !== 'number' || !Number.isInteger(options.poolSize) || options.poolSize < 0)) {
             throw new TypeError('poolSize must be a non-negative integer.');
         }
-        const rotation = options.rotation ?? videoTrack.rotation;
-        const [rotatedWidth, rotatedHeight] = rotation % 180 === 0
-            ? [videoTrack.squarePixelWidth, videoTrack.squarePixelHeight]
-            : [videoTrack.squarePixelHeight, videoTrack.squarePixelWidth];
-        const crop = options.crop;
-        if (crop) {
-            clampCropRectangle(crop, rotatedWidth, rotatedHeight);
-        }
-        let [width, height] = crop
-            ? [crop.width, crop.height]
-            : [rotatedWidth, rotatedHeight];
-        const originalAspectRatio = width / height;
-        // If width and height aren't defined together, deduce the missing value using the aspect ratio
-        if (options.width !== undefined && options.height === undefined) {
-            width = options.width;
-            height = Math.round(width / originalAspectRatio);
-        }
-        else if (options.width === undefined && options.height !== undefined) {
-            height = options.height;
-            width = Math.round(height * originalAspectRatio);
-        }
-        else if (options.width !== undefined && options.height !== undefined) {
-            width = options.width;
-            height = options.height;
-        }
         this._videoTrack = videoTrack;
         this._alpha = options.alpha ?? false;
-        this._width = width;
-        this._height = height;
-        this._rotation = rotation;
-        this._crop = crop;
+        this._options = options;
         this._fit = options.fit ?? 'fill';
         this._videoSampleSink = new VideoSampleSink(videoTrack);
         this._canvasPool = Array.from({ length: options.poolSize ?? 0 }, () => null);
     }
     /** @internal */
+    _ensureInit() {
+        return this._initPromise ??= (async () => {
+            const options = this._options;
+            const videoTrack = this._videoTrack;
+            const rotation = options.rotation ?? await videoTrack.getRotation();
+            const squarePixelWidth = await videoTrack.getSquarePixelWidth();
+            const squarePixelHeight = await videoTrack.getSquarePixelHeight();
+            const [rotatedWidth, rotatedHeight] = rotation % 180 === 0
+                ? [squarePixelWidth, squarePixelHeight]
+                : [squarePixelHeight, squarePixelWidth];
+            let crop = options.crop;
+            if (crop) {
+                crop = clampCropRectangle(crop, rotatedWidth, rotatedHeight);
+            }
+            let [width, height] = crop
+                ? [crop.width, crop.height]
+                : [rotatedWidth, rotatedHeight];
+            const originalAspectRatio = width / height;
+            // If width and height aren't defined together, deduce the missing value using the aspect ratio
+            if (options.width !== undefined && options.height === undefined) {
+                width = options.width;
+                height = Math.round(width / originalAspectRatio);
+            }
+            else if (options.width === undefined && options.height !== undefined) {
+                height = options.height;
+                width = Math.round(height * originalAspectRatio);
+            }
+            else if (options.width !== undefined && options.height !== undefined) {
+                width = options.width;
+                height = options.height;
+            }
+            this._width = width;
+            this._height = height;
+            this._rotation = rotation;
+            this._crop = crop;
+        })();
+    }
+    /** @internal */
     _videoSampleToWrappedCanvas(sample) {
+        const width = this._width;
+        const height = this._height;
         let canvas = this._canvasPool[this._nextCanvasIndex];
         let canvasIsNew = false;
         if (!canvas) {
             if (typeof document !== 'undefined') {
                 // Prefer an HTMLCanvasElement
                 canvas = document.createElement('canvas');
-                canvas.width = this._width;
-                canvas.height = this._height;
+                canvas.width = width;
+                canvas.height = height;
             }
             else {
-                canvas = new OffscreenCanvas(this._width, this._height);
+                canvas = new OffscreenCanvas(width, height);
             }
             if (this._canvasPool.length > 0) {
                 this._canvasPool[this._nextCanvasIndex] = canvas;
@@ -1260,10 +1575,10 @@ export class CanvasSink {
         if (!canvasIsNew) {
             if (!this._alpha && isFirefox()) {
                 context.fillStyle = 'black';
-                context.fillRect(0, 0, this._width, this._height);
+                context.fillRect(0, 0, width, height);
             }
             else {
-                context.clearRect(0, 0, this._width, this._height);
+                context.clearRect(0, 0, width, height);
             }
         }
         sample.drawWithFit(context, {
@@ -1285,10 +1600,12 @@ export class CanvasSink {
      * timestamp. Returns null if the timestamp is before the track's first timestamp.
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    async getCanvas(timestamp) {
+    async getCanvas(timestamp, options) {
         validateTimestamp(timestamp);
-        const sample = await this._videoSampleSink.getSample(timestamp);
+        await this._ensureInit();
+        const sample = await this._videoSampleSink.getSample(timestamp, options);
         return sample && this._videoSampleToWrappedCanvas(sample);
     }
     /**
@@ -1297,9 +1614,11 @@ export class CanvasSink {
      *
      * @param startTimestamp - The timestamp in seconds at which to start yielding canvases (inclusive).
      * @param endTimestamp - The timestamp in seconds at which to stop yielding canvases (exclusive).
+     * @param options - Options used for the underlying packet retrieval.
      */
-    canvases(startTimestamp = 0, endTimestamp = Infinity) {
-        return mapAsyncGenerator(this._videoSampleSink.samples(startTimestamp, endTimestamp), sample => this._videoSampleToWrappedCanvas(sample));
+    async *canvases(startTimestamp, endTimestamp, options) {
+        await this._ensureInit();
+        yield* mapAsyncGenerator(this._videoSampleSink.samples(startTimestamp, endTimestamp, options), sample => this._videoSampleToWrappedCanvas(sample));
     }
     /**
      * Creates an async iterator that yields a canvas for each timestamp in the argument. This method uses an optimized
@@ -1307,10 +1626,15 @@ export class CanvasSink {
      * therefore more efficient than manually getting the canvas for every timestamp. The iterator may yield null if
      * no frame is available for a given timestamp.
      *
+     * This method is good for sparse access of media data. If you want primarily sequential media access, prefer
+     * {@link CanvasSink.canvases} instead.
+     *
      * @param timestamps - An iterable or async iterable of timestamps in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    canvasesAtTimestamps(timestamps) {
-        return mapAsyncGenerator(this._videoSampleSink.samplesAtTimestamps(timestamps), sample => sample && this._videoSampleToWrappedCanvas(sample));
+    async *canvasesAtTimestamps(timestamps, options) {
+        await this._ensureInit();
+        yield* mapAsyncGenerator(this._videoSampleSink.samplesAtTimestamps(timestamps, options), sample => sample && this._videoSampleToWrappedCanvas(sample));
     }
 }
 class AudioDecoderWrapper extends DecoderWrapper {
@@ -1323,11 +1647,20 @@ class AudioDecoderWrapper extends DecoderWrapper {
         // Internal state to accumulate a precise current timestamp based on audio durations, not the (potentially
         // inaccurate) packet timestamps.
         this.currentTimestamp = null;
+        // Chromium does not respect negative packet timestamps, so we must do the fixin' ourselves
+        this.expectedFirstTimestamp = null;
+        this.timestampOffset = 0;
         const sampleHandler = (sample) => {
+            let sampleTimestamp = sample.timestamp;
+            if (this.expectedFirstTimestamp && this.currentTimestamp === null) {
+                this.timestampOffset = this.expectedFirstTimestamp - sampleTimestamp;
+                ;
+            }
+            sampleTimestamp += this.timestampOffset;
             if (this.currentTimestamp === null
-                || Math.abs(sample.timestamp - this.currentTimestamp) >= sample.duration) {
+                || Math.abs(sampleTimestamp - this.currentTimestamp) >= sample.duration) {
                 // We need to sync with the sample timestamp again
-                this.currentTimestamp = sample.timestamp;
+                this.currentTimestamp = sampleTimestamp;
             }
             const preciseTimestamp = this.currentTimestamp;
             this.currentTimestamp += sample.duration;
@@ -1396,17 +1729,21 @@ class AudioDecoderWrapper extends DecoderWrapper {
         }
         else {
             assert(this.decoder);
+            this.expectedFirstTimestamp ??= packet.timestamp;
             this.decoder.decode(packet.toEncodedAudioChunk());
         }
     }
-    flush() {
+    async flush() {
         if (this.customDecoder) {
-            return this.customDecoderCallSerializer.call(() => this.customDecoder.flush());
+            await this.customDecoderCallSerializer.call(() => this.customDecoder.flush());
         }
         else {
             assert(this.decoder);
-            return this.decoder.flush();
+            await this.decoder.flush();
         }
+        this.currentTimestamp = null;
+        this.expectedFirstTimestamp = null;
+        this.timestampOffset = 0;
     }
     close() {
         if (this.customDecoder) {
@@ -1640,7 +1977,7 @@ export class AudioSampleSink extends BaseMediaSampleSink {
             throw new Error('This audio track cannot be decoded by this browser. Make sure to check decodability before using'
                 + ' a track.');
         }
-        const codec = this._track.codec;
+        const codec = await this._track.getCodec();
         const decoderConfig = await this._track.getDecoderConfig();
         assert(codec && decoderConfig);
         if (PCM_AUDIO_CODECS.includes(decoderConfig.codec)) {
@@ -1660,10 +1997,11 @@ export class AudioSampleSink extends BaseMediaSampleSink {
      * Returns null if the timestamp is before the track's first timestamp.
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    async getSample(timestamp) {
+    async getSample(timestamp, options = {}) {
         validateTimestamp(timestamp);
-        for await (const sample of this.mediaSamplesAtTimestamps([timestamp])) {
+        for await (const sample of this.mediaSamplesAtTimestamps([timestamp], options)) {
             return sample;
         }
         throw new Error('Internal error: Iterator returned nothing.');
@@ -1674,9 +2012,10 @@ export class AudioSampleSink extends BaseMediaSampleSink {
      *
      * @param startTimestamp - The timestamp in seconds at which to start yielding samples (inclusive).
      * @param endTimestamp - The timestamp in seconds at which to stop yielding samples (exclusive).
+     * @param options - Options used for the underlying packet retrieval.
      */
-    samples(startTimestamp = 0, endTimestamp = Infinity) {
-        return this.mediaSamplesInRange(startTimestamp, endTimestamp);
+    samples(startTimestamp, endTimestamp, options = {}) {
+        return this.mediaSamplesInRange(startTimestamp, endTimestamp, options);
     }
     /**
      * Creates an async iterator that yields an audio sample for each timestamp in the argument. This method
@@ -1684,10 +2023,14 @@ export class AudioSampleSink extends BaseMediaSampleSink {
      * once, and is therefore more efficient than manually getting the sample for every timestamp. The iterator may
      * yield null if no sample is available for a given timestamp.
      *
+     * This method is good for sparse access of media data. If you want primarily sequential media access, prefer
+     * {@link AudioSampleSink.samples} instead.
+     *
      * @param timestamps - An iterable or async iterable of timestamps in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    samplesAtTimestamps(timestamps) {
-        return this.mediaSamplesAtTimestamps(timestamps);
+    samplesAtTimestamps(timestamps, options = {}) {
+        return this.mediaSamplesAtTimestamps(timestamps, options);
     }
 }
 /**
@@ -1721,10 +2064,11 @@ export class AudioBufferSink {
      * Returns null if the timestamp is before the track's first timestamp.
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    async getBuffer(timestamp) {
+    async getBuffer(timestamp, options) {
         validateTimestamp(timestamp);
-        const data = await this._audioSampleSink.getSample(timestamp);
+        const data = await this._audioSampleSink.getSample(timestamp, options);
         return data && this._audioSampleToWrappedArrayBuffer(data);
     }
     /**
@@ -1733,9 +2077,10 @@ export class AudioBufferSink {
      *
      * @param startTimestamp - The timestamp in seconds at which to start yielding buffers (inclusive).
      * @param endTimestamp - The timestamp in seconds at which to stop yielding buffers (exclusive).
+     * @param options - Options used for the underlying packet retrieval.
      */
-    buffers(startTimestamp = 0, endTimestamp = Infinity) {
-        return mapAsyncGenerator(this._audioSampleSink.samples(startTimestamp, endTimestamp), data => this._audioSampleToWrappedArrayBuffer(data));
+    buffers(startTimestamp, endTimestamp, options) {
+        return mapAsyncGenerator(this._audioSampleSink.samples(startTimestamp, endTimestamp, options), data => this._audioSampleToWrappedArrayBuffer(data));
     }
     /**
      * Creates an async iterator that yields an audio buffer for each timestamp in the argument. This method
@@ -1744,8 +2089,9 @@ export class AudioBufferSink {
      * yield null if no buffer is available for a given timestamp.
      *
      * @param timestamps - An iterable or async iterable of timestamps in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    buffersAtTimestamps(timestamps) {
-        return mapAsyncGenerator(this._audioSampleSink.samplesAtTimestamps(timestamps), data => data && this._audioSampleToWrappedArrayBuffer(data));
+    buffersAtTimestamps(timestamps, options) {
+        return mapAsyncGenerator(this._audioSampleSink.samplesAtTimestamps(timestamps, options), data => data && this._audioSampleToWrappedArrayBuffer(data));
     }
 }

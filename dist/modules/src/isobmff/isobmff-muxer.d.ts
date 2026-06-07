@@ -11,7 +11,7 @@ import { Rational } from '../misc.js';
 import { IsobmffOutputFormat } from '../output-format.js';
 import { SubtitleConfig, SubtitleCue, SubtitleMetadata } from '../subtitles.js';
 import { EncodedPacket, PacketType } from '../packet.js';
-export declare const GLOBAL_TIMESCALE = 1000;
+export declare const GLOBAL_TIMESCALE = 57600;
 export type Sample = {
     timestamp: number;
     decodeTimestamp: number;
@@ -44,12 +44,14 @@ export type IsobmffTrackData = {
     }[];
     lastTimescaleUnits: number | null;
     lastSample: Sample | null;
+    startTimestampOffset: number | null;
     finalizedChunks: Chunk[];
     currentChunk: Chunk | null;
     compactlyCodedChunkTable: {
         firstChunk: number;
         samplesPerChunk: number;
     }[];
+    closed: boolean;
 } & ({
     track: OutputVideoTrack;
     type: 'video';
@@ -77,6 +79,7 @@ export type IsobmffTrackData = {
          * Some players expect this for PCM audio.
          */
         requiresPcmTransformation: boolean;
+        expectedNextPcmPacketTimestamp: number | null;
         /**
          * The "ADTS stripping" involves removing the ADTS header from each AAC packet. SOBMFF stores raw AAC data, not
          * ADTS-wrapped data.
@@ -113,9 +116,12 @@ export declare class IsobmffMuxer extends Muxer {
     format: IsobmffOutputFormat;
     private writer;
     private boxWriter;
+    private initWriter;
+    private initBoxWriter;
     private fastStart;
     isFragmented: boolean;
     isQuickTime: boolean;
+    isCmaf: boolean;
     private auxTarget;
     private auxWriter;
     private auxBoxWriter;
@@ -127,7 +133,10 @@ export declare class IsobmffMuxer extends Muxer {
     private finalizedChunks;
     private nextFragmentNumber;
     private maxWrittenTimestamp;
+    minWrittenTimestamp: number;
+    maxWrittenEndTimestamp: number;
     private minimumFragmentDuration;
+    private segmentHeaderSize;
     constructor(output: Output, format: IsobmffOutputFormat);
     start(): Promise<void>;
     private allTracksAreKnown;
@@ -137,7 +146,7 @@ export declare class IsobmffMuxer extends Muxer {
     private getSubtitleTrackData;
     addEncodedVideoPacket(track: OutputVideoTrack, packet: EncodedPacket, meta?: EncodedVideoChunkMetadata): Promise<void>;
     addEncodedAudioPacket(track: OutputAudioTrack, packet: EncodedPacket, meta?: EncodedAudioChunkMetadata): Promise<void>;
-    private maybePadWithSilence;
+    private padWithSilence;
     addSubtitleCue(track: OutputSubtitleTrack, cue: SubtitleCue, meta?: SubtitleMetadata): Promise<void>;
     private processWebVTTCues;
     private createSampleForTrack;
@@ -150,6 +159,7 @@ export declare class IsobmffMuxer extends Muxer {
     private registerSampleFastStartReserve;
     private computeSampleTableSizeUpperBound;
     onTrackClose(track: OutputTrack): Promise<void>;
+    ensureOneEnabledTrack(): void;
     /** Finalizes the file, making it ready for use. Must be called after all video and audio chunks have been added. */
     finalize(): Promise<void>;
 }

@@ -51,6 +51,36 @@ export declare class EncodedVideoPacketSource extends VideoSource {
      */
     add(packet: EncodedPacket, meta?: EncodedVideoChunkMetadata): Promise<void>;
 }
+/** Utility class for splitting a composite frame into separate color and alpha components. */
+export declare class ColorAlphaSplitter {
+    static forceCpu: boolean;
+    canvas: OffscreenCanvas | HTMLCanvasElement | null;
+    private gl;
+    private colorProgram;
+    private alphaProgram;
+    private vao;
+    private sourceTexture;
+    private alphaResolutionLocation;
+    private worker;
+    private pendingRequests;
+    private nextRequestId;
+    constructor(initialWidth: number, initialHeight: number);
+    update(sourceFrame: VideoFrame): Promise<{
+        colorFrame: VideoFrame;
+        alphaFrame: VideoFrame;
+    }>;
+    private updateGpu;
+    private createVertexShader;
+    private createColorProgram;
+    private createAlphaProgram;
+    private createShader;
+    private createVAO;
+    private createTexture;
+    private runColorProgram;
+    private runAlphaProgram;
+    private updateCpu;
+    close(): void;
+}
 /**
  * This source can be used to add raw, unencoded video samples (frames) to an output video track. These frames will
  * automatically be encoded and then piped into the output.
@@ -95,7 +125,7 @@ export declare class CanvasSource extends VideoSource {
     add(timestamp: number, duration?: number, encodeOptions?: VideoEncoderEncodeOptions): Promise<void>;
 }
 /**
- * Options for MediaStreamVideoTrackSource.
+ * Options for {@link MediaStreamVideoTrackSource}.
  * @group Media sources
  * @public
  */
@@ -107,6 +137,21 @@ export type MediaStreamVideoTrackSourceOptions = {
      * lead to wildly irregular FPS.
      */
     frameRate?: number | null;
+    /**
+     * Controls the basis (zero point) for video frame timestamps.
+     *
+     * When set to `'synced-zero'`, timestamps will be relative to the first chunk of media from a `MediaStreamTrack`
+     * added to the {@link Output}.
+     *
+     * When set to `'zero'`, timestamps will be relative to the first video frame emitted by this source.
+     *
+     * When set to `'unix'`, timestamps will be relative to the Unix epoch, so clearly associated with a distinct point
+     * in time. Here, pausing via {@link MediaStreamVideoTrackSource.pause} will also create gaps in timestamps. Be sure
+     * to pair this mode with {@link BaseTrackMetadata.isRelativeToUnixEpoch}.
+     *
+     * Defaults to `'synced-zero'`.
+     */
+    timestampBase?: 'synced-zero' | 'zero' | 'unix';
 };
 /**
  * Video source that encodes the frames of a
@@ -207,6 +252,28 @@ export declare class AudioBufferSource extends AudioSource {
     add(audioBuffer: AudioBuffer): Promise<void>;
 }
 /**
+ * Options for {@link MediaStreamAudioTrackSource}.
+ * @group Media sources
+ * @public
+ */
+export type MediaStreamAudioTrackSourceOptions = {
+    /**
+     * Controls the basis (zero point) for audio sample timestamps.
+     *
+     * When set to `'synced-zero'`, timestamps will be relative to the first chunk of media from a `MediaStreamTrack`
+     * added to the {@link Output}.
+     *
+     * When set to `'zero'`, timestamps will be relative to the first audio sample emitted by this source.
+     *
+     * When set to `'unix'`, timestamps will be relative to the Unix epoch, so clearly associated with a distinct point
+     * in time. Here, pausing via {@link MediaStreamAudioTrackSource.pause} will also create gaps in timestamps. Be sure
+     * to pair this mode with {@link BaseTrackMetadata.isRelativeToUnixEpoch}.
+     *
+     * Defaults to `'synced-zero'`.
+     */
+    timestampBase?: 'synced-zero' | 'zero' | 'unix';
+};
+/**
  * Audio source that encodes the data of a
  * [`MediaStreamAudioTrack`](https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack) and pipes it into the
  * output. This is useful for capturing live or real-time audio such as microphones or audio from other media elements.
@@ -224,7 +291,7 @@ export declare class MediaStreamAudioTrackSource extends AudioSource {
      * Creates a new {@link MediaStreamAudioTrackSource} from a `MediaStreamAudioTrack`, which will pull audio samples
      * from the stream in real time and encode them according to {@link AudioEncodingConfig}.
      */
-    constructor(track: MediaStreamAudioTrack, encodingConfig: AudioEncodingConfig);
+    constructor(track: MediaStreamAudioTrack, encodingConfig: AudioEncodingConfig, options?: MediaStreamAudioTrackSourceOptions);
     /**
      * Pauses the capture of audio data - any audio data emitted by the underlying media stream will be ignored
      * while paused. This does *not* close the underlying `MediaStreamAudioTrack`, it just ignores its output.

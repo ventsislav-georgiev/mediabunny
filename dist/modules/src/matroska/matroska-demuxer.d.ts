@@ -8,7 +8,7 @@
 import { AacCodecInfo, AudioCodec, SubtitleCodec, VideoCodec } from '../codec.js';
 import { Demuxer } from '../demuxer.js';
 import { Input } from '../input.js';
-import { InputTrack } from '../input-track.js';
+import { InputTrackBacking } from '../input-track.js';
 import { MetadataTags, TrackDisposition } from '../metadata.js';
 import { Rotation } from '../misc.js';
 import { FileSlice, Reader } from '../reader.js';
@@ -116,13 +116,14 @@ type InternalTrack = {
     }[];
     cuePoints: CuePoint[];
     disposition: TrackDisposition;
-    inputTrack: InputTrack | null;
+    trackBacking: InputTrackBacking | null;
     codecId: string | null;
     codecPrivate: Uint8Array | null;
     defaultDuration: number | null;
     defaultDurationNs: number | null;
     name: string | null;
     languageCode: string;
+    hasLanguageBcp47: boolean;
     decodingInstructions: DecodingInstruction[];
     info: null | {
         type: 'video';
@@ -177,8 +178,7 @@ export declare class MatroskaDemuxer extends Demuxer {
     } | null;
     isWebM: boolean;
     constructor(input: Input);
-    computeDuration(): Promise<number>;
-    getTracks(): Promise<InputTrack[]>;
+    getTrackBackings(): Promise<InputTrackBacking[]>;
     getMimeType(): Promise<string>;
     getMetadataTags(): Promise<MetadataTags>;
     readMetadata(): Promise<void>;

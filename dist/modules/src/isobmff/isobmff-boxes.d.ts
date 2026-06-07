@@ -8,7 +8,7 @@
 import { Writer } from '../writer.js';
 import { IsobmffAudioTrackData, IsobmffMuxer, IsobmffSubtitleTrackData, IsobmffTrackData, IsobmffVideoTrackData } from './isobmff-muxer.js';
 export declare class IsobmffBoxWriter {
-    private writer;
+    writer: Writer;
     private helper;
     private helperView;
     /**
@@ -46,7 +46,12 @@ export declare const ftyp: (details: {
     holdsAvc: boolean;
     holdsAv1: boolean;
     fragmented: boolean;
+    cmaf: boolean;
 }) => Box;
+/** Segment Type Box */
+export declare const styp: () => Box;
+/** Segment Index Box */
+export declare const sidx: (muxer: IsobmffMuxer, referencedSize: number) => Box;
 /** Movie Sample Data Box. Contains the actual frames/samples of the media. */
 export declare const mdat: (reserveLargeSize: boolean) => Box;
 /** Free Space Box: A box that designates unused space in the movie data file. */
@@ -66,6 +71,8 @@ export declare const mvhd: (creationTime: number, trackDatas: IsobmffTrackData[]
 export declare const trak: (trackData: IsobmffTrackData, creationTime: number) => Box;
 /** Track Header Box: Specifies the characteristics of a single track within a movie. */
 export declare const tkhd: (trackData: IsobmffTrackData, creationTime: number) => Box;
+/** Edit Box: Specifies edits to the track's media. */
+export declare const edts: (trackData: IsobmffTrackData, offset: number) => Box;
 /** Media Box: Describes and define a track's media type and sample data. */
 export declare const mdia: (trackData: IsobmffTrackData, creationTime: number) => Box;
 /** Media Header Box: Specifies the characteristics of a media, including timescale and duration. */

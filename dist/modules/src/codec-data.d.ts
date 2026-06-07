@@ -131,6 +131,7 @@ export type HevcSpsInfo = {
     bitDepthChromaMinus8: number;
     minSpatialSegmentationIdc: number;
 };
+export declare const concatHevcNalUnits: (nalUnits: Uint8Array[], decoderConfig: VideoDecoderConfig) => Uint8Array<ArrayBuffer>;
 export declare const iterateHevcNalUnits: (packetData: Uint8Array, decoderConfig: VideoDecoderConfig) => Generator<NalUnitLocation, any, any>;
 export declare const extractNalUnitTypeForHevc: (byte: number) => number;
 /** Parses an HEVC SPS (Sequence Parameter Set) to extract video information. */
@@ -141,6 +142,7 @@ export declare const extractHevcDecoderConfigurationRecord: (packetData: Uint8Ar
 export declare const serializeHevcDecoderConfigurationRecord: (record: HevcDecoderConfigurationRecord) => Uint8Array<ArrayBuffer>;
 /** Deserializes an HevcDecoderConfigurationRecord from the format specified in Section 8.3.3.1 of ISO 14496-15. */
 export declare const deserializeHevcDecoderConfigurationRecord: (data: Uint8Array) => HevcDecoderConfigurationRecord | null;
+export declare const sanitizeHevcPacketForChromium: (packetData: Uint8Array, decoderConfig: VideoDecoderConfig) => Uint8Array | null;
 export type Vp9CodecInfo = {
     profile: number;
     level: number;

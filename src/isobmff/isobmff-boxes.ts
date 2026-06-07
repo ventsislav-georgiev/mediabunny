@@ -57,7 +57,7 @@ export class IsobmffBoxWriter {
 	 */
 	offsets = new WeakMap<Box, number>();
 
-	constructor(private writer: Writer) {}
+	constructor(public writer: Writer) {}
 
 	writeU32(value: number) {
 		this.helperView.setUint32(0, value, false);
@@ -174,6 +174,12 @@ const u64 = (value: number) => {
 	return [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]] as number[];
 };
 
+const i64 = (value: number) => {
+	view.setInt32(0, Math.floor(value / 2 ** 32), false);
+	view.setUint32(4, value, false);
+	return [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]] as number[];
+};
+
 const fixed_8_8 = (value: number) => {
 	view.setInt16(0, 2 ** 8 * value, false);
 	return [bytes[0], bytes[1]] as number[];
@@ -218,18 +224,6 @@ const ascii = (text: string, nullTerminated = false) => {
 	const bytes = Array(text.length).fill(null).map((_, i) => text.charCodeAt(i));
 	if (nullTerminated) bytes.push(0x00);
 	return bytes;
-};
-
-const lastPresentedSample = (samples: Sample[]) => {
-	let result: Sample | null = null;
-
-	for (const sample of samples) {
-		if (!result || sample.timestamp > result.timestamp) {
-			result = sample;
-		}
-	}
-
-	return result;
 };
 
 const rotationMatrix = (rotationInDegrees: number): TransformationMatrix => {
@@ -292,6 +286,7 @@ export const ftyp = (details: {
 	holdsAvc: boolean;
 	holdsAv1: boolean;
 	fragmented: boolean;
+	cmaf: boolean;
 }) => {
 	// You can find the full logic for this at
 	// https://github.com/FFmpeg/FFmpeg/blob/de2fb43e785773738c660cdafb9309b1ef1bc80d/libavformat/movenc.c#L5518
@@ -309,15 +304,29 @@ export const ftyp = (details: {
 	}
 
 	if (details.fragmented) {
-		return box('ftyp', [
-			ascii('iso5'), // Major brand
-			u32(minorVersion), // Minor version
-			// Compatible brands
-			ascii('iso5'),
-			ascii('iso6'),
-			details.holdsAv1 ? ascii('av01') : [],
-			ascii('mp41'),
-		]);
+		if (details.cmaf) {
+			return box('ftyp', [
+				ascii('iso5'), // Major brand
+				u32(minorVersion), // Minor version
+				// Compatible brands
+				ascii('iso5'),
+				ascii('iso6'),
+				details.holdsAv1 ? ascii('av01') : [],
+				ascii('mp41'),
+				ascii('cmfc'),
+				ascii('dash'),
+			]);
+		} else {
+			return box('ftyp', [
+				ascii('iso5'), // Major brand
+				u32(minorVersion), // Minor version
+				// Compatible brands
+				ascii('iso5'),
+				ascii('iso6'),
+				details.holdsAv1 ? ascii('av01') : [],
+				ascii('mp41'),
+			]);
+		}
 	}
 
 	return box('ftyp', [
@@ -331,6 +340,38 @@ export const ftyp = (details: {
 	]);
 };
 
+/** Segment Type Box */
+export const styp = () => box('styp', [
+	ascii('iso5'), // Major brand
+	u32(0), // Minor version
+	// Compatible brands
+	ascii('iso5'),
+	ascii('iso6'),
+	ascii('mp41'),
+	ascii('cmfc'),
+	ascii('dash'),
+]);
+
+/** Segment Index Box */
+export const sidx = (muxer: IsobmffMuxer, referencedSize: number) => {
+	let duration = muxer.maxWrittenEndTimestamp - muxer.minWrittenTimestamp;
+	if (!Number.isFinite(duration)) {
+		duration = 0;
+	}
+
+	return fullBox('sidx', 1, 0, [
+		u32(1), // Reference ID
+		u32(GLOBAL_TIMESCALE), // Timescale
+		u64(intoTimescale(muxer.minWrittenTimestamp, GLOBAL_TIMESCALE)), // Earliest presentation time
+		u64(0), // First offset
+		u16(0), // Reserved
+		u16(1), // Reference count
+		u32(referencedSize & 0x7fffffff), // Reference type (0) + referenced size
+		u32(intoTimescale(duration, GLOBAL_TIMESCALE)), // Subsegment duration
+		u32(0), // Starts with SAP + SAP type + SAP delta time (no information provided)
+	]);
+};
+
 /** Movie Sample Data Box. Contains the actual frames/samples of the media. */
 export const mdat = (reserveLargeSize: boolean): Box => ({ type: 'mdat', largeSize: reserveLargeSize });
 
@@ -341,27 +382,28 @@ export const free = (size: number): Box => ({ type: 'free', size });
  * Movie Box: Used to specify the information that defines a movie - that is, the information that allows
  * an application to interpret the sample data that is stored elsewhere.
  */
-export const moov = (muxer: IsobmffMuxer) => box('moov', undefined, [
-	mvhd(muxer.creationTime, muxer.trackDatas),
-	...muxer.trackDatas.map(x => trak(x, muxer.creationTime)),
-	muxer.isFragmented ? mvex(muxer.trackDatas) : null,
-	udta(muxer),
-]);
+export const moov = (muxer: IsobmffMuxer) => {
+	return box('moov', undefined, [
+		mvhd(muxer.creationTime, muxer.trackDatas),
+		...muxer.trackDatas.map(x => trak(x, muxer.creationTime)),
+		muxer.isFragmented ? mvex(muxer.trackDatas) : null,
+		udta(muxer),
+	]);
+};
 
 /** Movie Header Box: Used to specify the characteristics of the entire movie, such as timescale and duration. */
 export const mvhd = (
 	creationTime: number,
 	trackDatas: IsobmffTrackData[],
 ) => {
-	const duration = intoTimescale(Math.max(
+	const duration = Math.max(
 		0,
 		...trackDatas
-			.filter(x => x.samples.length > 0)
-			.map((x) => {
-				const lastSample = lastPresentedSample(x.samples)!;
-				return lastSample.timestamp + lastSample.duration;
-			}),
-	), GLOBAL_TIMESCALE);
+			.map(trackData => (
+				intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE)
+				+ intoTimescale(trackData.startTimestampOffset ?? 0, GLOBAL_TIMESCALE)
+			)),
+	);
 	const nextTrackId = Math.max(0, ...trackDatas.map(x => x.track.id)) + 1;
 
 	// Conditionally use u64 if u32 isn't enough
@@ -382,6 +424,32 @@ export const mvhd = (
 	]);
 };
 
+const presentationSpan = (trackData: IsobmffTrackData) => {
+	if (trackData.samples.length === 0) {
+		return 0;
+	}
+
+	let minTimestamp = Infinity;
+	let maxEndTimestamp = -Infinity;
+
+	for (let i = 0; i < trackData.samples.length; i++) {
+		const sample = trackData.samples[i]!;
+
+		if (sample.timestamp < minTimestamp) {
+			minTimestamp = sample.timestamp;
+		}
+		if (sample.timestamp + sample.duration > maxEndTimestamp) {
+			maxEndTimestamp = sample.timestamp + sample.duration;
+		}
+	}
+
+	if (minTimestamp === Infinity) {
+		return 0;
+	}
+
+	return maxEndTimestamp - minTimestamp;
+};
+
 /**
  * Track Box: Defines a single track of a movie. A movie may consist of one or more tracks. Each track is
  * independent of the other tracks in the movie and carries its own temporal and spatial information. Each Track Box
@@ -389,9 +457,11 @@ export const mvhd = (
  */
 export const trak = (trackData: IsobmffTrackData, creationTime: number) => {
 	const trackMetadata = getTrackMetadata(trackData);
+	const needsEditList = trackData.startTimestampOffset !== null && trackData.startTimestampOffset > 0;
 
 	return box('trak', undefined, [
 		tkhd(trackData, creationTime),
+		needsEditList ? edts(trackData, trackData.startTimestampOffset!) : null,
 		mdia(trackData, creationTime),
 		trackMetadata.name !== undefined
 			? box('udta', undefined, [
@@ -408,11 +478,8 @@ export const tkhd = (
 	trackData: IsobmffTrackData,
 	creationTime: number,
 ) => {
-	const lastSample = lastPresentedSample(trackData.samples);
-	const durationInGlobalTimescale = intoTimescale(
-		lastSample ? lastSample.timestamp + lastSample.duration : 0,
-		GLOBAL_TIMESCALE,
-	);
+	const durationInGlobalTimescale = intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE)
+		+ intoTimescale(trackData.startTimestampOffset ?? 0, GLOBAL_TIMESCALE);
 
 	const needsU64 = !isU32(creationTime) || !isU32(durationInGlobalTimescale);
 	const u32OrU64 = needsU64 ? u64 : u32;
@@ -447,6 +514,32 @@ export const tkhd = (
 	]);
 };
 
+/** Edit Box: Specifies edits to the track's media. */
+export const edts = (trackData: IsobmffTrackData, offset: number) => {
+	const startOffset = intoTimescale(offset, GLOBAL_TIMESCALE);
+	const mediaDuration = intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE);
+
+	const needs64Bits = !isU32(startOffset) || !isU32(mediaDuration);
+	const u32OrU64 = needs64Bits ? u64 : u32;
+	const i32OrI64 = needs64Bits ? i64 : i32;
+
+	return box('edts', undefined, [
+		fullBox('elst', needs64Bits ? 1 : 0, 0, [
+			u32(2), // Entry count
+
+			// #1
+			u32OrU64(startOffset), // Segment duration
+			i32OrI64(-1), // Media time
+			fixed_16_16(1), // Media rate
+
+			// #2
+			u32OrU64(mediaDuration), // Segment duration
+			i32OrI64(0), // Media time
+			fixed_16_16(1), // Media rate
+		]),
+	]);
+};
+
 /** Media Box: Describes and define a track's media type and sample data. */
 export const mdia = (trackData: IsobmffTrackData, creationTime: number) => box('mdia', undefined, [
 	mdhd(trackData, creationTime),
@@ -459,9 +552,9 @@ export const mdhd = (
 	trackData: IsobmffTrackData,
 	creationTime: number,
 ) => {
-	const lastSample = lastPresentedSample(trackData.samples);
+	// Since the duration represents the raw media duration, edit list offsets are not taken into account here
 	const localDuration = intoTimescale(
-		lastSample ? lastSample.timestamp + lastSample.duration : 0,
+		presentationSpan(trackData),
 		trackData.timescale,
 	);
 
@@ -658,11 +751,13 @@ export const pasp = (trackData: IsobmffVideoTrackData) => {
 
 /** Colour Information Box: Specifies the color space of the video. */
 export const colr = (trackData: IsobmffVideoTrackData) => box('colr', [
-	ascii('nclx'), // Colour type
+	ascii(trackData.muxer.isQuickTime ? 'nclc' : 'nclx'), // Colour type
 	u16(COLOR_PRIMARIES_MAP[trackData.info.decoderConfig.colorSpace!.primaries!]), // Colour primaries
 	u16(TRANSFER_CHARACTERISTICS_MAP[trackData.info.decoderConfig.colorSpace!.transfer!]), // Transfer characteristics
 	u16(MATRIX_COEFFICIENTS_MAP[trackData.info.decoderConfig.colorSpace!.matrix!]), // Matrix coefficients
-	u8((trackData.info.decoderConfig.colorSpace!.fullRange ? 1 : 0) << 7), // Full range flag
+	trackData.muxer.isQuickTime
+		? [] // Doesn't have it
+		: u8((trackData.info.decoderConfig.colorSpace!.fullRange ? 1 : 0) << 7), // Full range flag
 ]);
 
 /** AVC Configuration Box: Provides additional information to the decoder. */

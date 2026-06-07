@@ -6,7 +6,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 import { Bitstream } from '../../shared/bitstream.js';
-import { COLOR_PRIMARIES_MAP, MATRIX_COEFFICIENTS_MAP, TRANSFER_CHARACTERISTICS_MAP, UNDETERMINED_LANGUAGE, assert, assertNever, colorSpaceIsComplete, imageMimeTypeToExtension, keyValueIterator, normalizeRotation, promiseWithResolvers, roundToMultiple, simplifyRational, textEncoder, toUint8Array, uint8ArraysAreEqual, writeBits, } from '../misc.js';
+import { COLOR_PRIMARIES_MAP, MATRIX_COEFFICIENTS_MAP, TRANSFER_CHARACTERISTICS_MAP, UNDETERMINED_LANGUAGE, assert, assertNever, colorSpaceIsComplete, imageMimeTypeToExtension, keyValueIterator, normalizeRotation, promiseWithResolvers, simplifyRational, textEncoder, toUint8Array, uint8ArraysAreEqual, writeBits, roundToDivisor, } from '../misc.js';
 import { CODEC_STRING_MAP, EBMLFloat32, EBMLFloat64, EBMLId, EBMLSignedInt, EBMLUnicodeString, EBMLWriter, } from './ebml.js';
 import { buildMatroskaMimeType } from './matroska-misc.js';
 import { WebMOutputFormat } from '../output-format.js';
@@ -45,16 +45,14 @@ export class MatroskaMuxer extends Muxer {
         this.currentClusterStartMsTimestamp = null;
         this.currentClusterMaxMsTimestamp = null;
         this.trackDatasInCurrentCluster = new Map();
-        this.duration = 0;
-        this.writer = output._writer;
+        this.startTimestamp = Infinity;
+        this.endTimestamp = -Infinity;
         this.format = format;
-        this.ebmlWriter = new EBMLWriter(this.writer);
-        if (this.format._options.appendOnly) {
-            this.writer.ensureMonotonicity = true;
-        }
     }
     async start() {
         const release = await this.mutex.acquire();
+        this.writer = await this.output._getRootWriter(!!this.format._options.appendOnly);
+        this.ebmlWriter = new EBMLWriter(this.writer);
         this.writeEBMLHeader();
         this.createSegmentInfo();
         this.createCues();
@@ -617,6 +615,7 @@ export class MatroskaMuxer extends Muxer {
             },
             chunkQueue: [],
             lastWrittenMsTimestamp: null,
+            closed: false,
         };
         if (track.source._codec === 'vp9') {
             // https://www.webmproject.org/docs/container specifies that VP9 "SHOULD" make use of the CodecPrivate
@@ -689,6 +688,7 @@ export class MatroskaMuxer extends Muxer {
             },
             chunkQueue: [],
             lastWrittenMsTimestamp: null,
+            closed: false,
         };
         this.trackDatas.push(newTrackData);
         this.trackDatas.sort((a, b) => a.track.id - b.track.id);
@@ -713,6 +713,7 @@ export class MatroskaMuxer extends Muxer {
             },
             chunkQueue: [],
             lastWrittenMsTimestamp: null,
+            closed: false,
         };
         this.trackDatas.push(newTrackData);
         this.trackDatas.sort((a, b) => a.track.id - b.track.id);
@@ -726,12 +727,13 @@ export class MatroskaMuxer extends Muxer {
         try {
             const trackData = this.getVideoTrackData(track, packet, meta);
             const isKeyFrame = packet.type === 'key';
-            let timestamp = this.validateAndNormalizeTimestamp(trackData.track, packet.timestamp, isKeyFrame);
+            this.validateTimestamp(trackData.track, packet.timestamp, isKeyFrame);
+            let timestamp = packet.timestamp;
             let duration = packet.duration;
             if (track.metadata.frameRate !== undefined) {
                 // Constrain the time values to the frame rate
-                timestamp = roundToMultiple(timestamp, 1 / track.metadata.frameRate);
-                duration = roundToMultiple(duration, 1 / track.metadata.frameRate);
+                timestamp = roundToDivisor(timestamp, track.metadata.frameRate);
+                duration = roundToDivisor(duration, track.metadata.frameRate);
             }
             const additions = trackData.info.alphaMode
                 ? packet.sideData.alpha ?? null
@@ -762,8 +764,8 @@ export class MatroskaMuxer extends Muxer {
                 packetData = packetData.subarray(headerLength);
             }
             const isKeyFrame = packet.type === 'key';
-            const timestamp = this.validateAndNormalizeTimestamp(trackData.track, packet.timestamp, isKeyFrame);
-            const audioChunk = this.createInternalChunk(packetData, timestamp, packet.duration, packet.type);
+            this.validateTimestamp(trackData.track, packet.timestamp, isKeyFrame);
+            const audioChunk = this.createInternalChunk(packetData, packet.timestamp, packet.duration, packet.type);
             trackData.chunkQueue.push(audioChunk);
             await this.interleaveChunks();
         }
@@ -775,9 +777,9 @@ export class MatroskaMuxer extends Muxer {
         const release = await this.mutex.acquire();
         try {
             const trackData = this.getSubtitleTrackData(track, meta);
-            const timestamp = this.validateAndNormalizeTimestamp(trackData.track, cue.timestamp, true);
+            this.validateTimestamp(trackData.track, cue.timestamp, true);
             let bodyText = cue.text;
-            const timestampMs = Math.round(timestamp * 1000);
+            const timestampMs = Math.round(cue.timestamp * 1000);
             if (track.source._codec === 'ass' || track.source._codec === 'ssa') {
                 bodyText = convertDialogueLineToMkvFormat(bodyText);
             }
@@ -791,7 +793,7 @@ export class MatroskaMuxer extends Muxer {
             }
             const body = textEncoder.encode(bodyText);
             const additions = `${cue.settings ?? ''}\n${cue.identifier ?? ''}\n${cue.notes ?? ''}`;
-            const subtitleChunk = this.createInternalChunk(body, timestamp, cue.duration, 'key', additions.trim() ? textEncoder.encode(additions) : null);
+            const subtitleChunk = this.createInternalChunk(body, cue.timestamp, cue.duration, 'key', additions.trim() ? textEncoder.encode(additions) : null);
             trackData.chunkQueue.push(subtitleChunk);
             await this.interleaveChunks();
         }
@@ -807,7 +809,7 @@ export class MatroskaMuxer extends Muxer {
             let trackWithMinTimestamp = null;
             let minTimestamp = Infinity;
             for (const trackData of this.trackDatas) {
-                if (!isFinalCall && trackData.chunkQueue.length === 0 && !trackData.track.source._closed) {
+                if (!isFinalCall && trackData.chunkQueue.length === 0 && !trackData.closed) {
                     break outer;
                 }
                 if (trackData.chunkQueue.length > 0 && trackData.chunkQueue[0].timestamp < minTimestamp) {
@@ -915,7 +917,7 @@ export class MatroskaMuxer extends Muxer {
             if (firstQueuedSample) {
                 return firstQueuedSample.type === 'key';
             }
-            return otherTrackData.track.source._closed;
+            return otherTrackData.closed;
         });
         let shouldCreateNewCluster = false;
         if (!this.currentCluster) {
@@ -983,7 +985,8 @@ export class MatroskaMuxer extends Muxer {
                 ] };
             this.ebmlWriter.writeEBML(blockGroup);
         }
-        this.duration = Math.max(this.duration, msTimestamp + msDuration);
+        this.startTimestamp = Math.min(this.startTimestamp, msTimestamp);
+        this.endTimestamp = Math.max(this.endTimestamp, msTimestamp + msDuration);
         trackData.lastWrittenMsTimestamp = msTimestamp;
         if (!this.trackDatasInCurrentCluster.has(trackData)) {
             this.trackDatasInCurrentCluster.set(trackData, {
@@ -1053,8 +1056,12 @@ export class MatroskaMuxer extends Muxer {
         }
     }
     // eslint-disable-next-line @typescript-eslint/no-misused-promises
-    async onTrackClose() {
+    async onTrackClose(track) {
         const release = await this.mutex.acquire();
+        const trackData = this.trackDatas.find(x => x.track === track);
+        if (trackData) {
+            trackData.closed = true;
+        }
         if (this.allTracksAreKnown()) {
             this.allTracksKnown.resolve();
         }
@@ -1066,6 +1073,9 @@ export class MatroskaMuxer extends Muxer {
     async finalize() {
         const release = await this.mutex.acquire();
         this.allTracksKnown.resolve();
+        for (const trackData of this.trackDatas) {
+            trackData.closed = true;
+        }
         if (!this.segment) {
             this.createSegment();
         }
@@ -1077,13 +1087,15 @@ export class MatroskaMuxer extends Muxer {
         assert(this.cues);
         this.ebmlWriter.writeEBML(this.cues);
         if (!this.format._options.appendOnly) {
-            const endPos = this.writer.getPos();
             // Write the Segment size
             const segmentSize = this.writer.getPos() - this.segmentDataOffset;
             this.writer.seek(this.ebmlWriter.offsets.get(this.segment) + 4);
             this.ebmlWriter.writeVarInt(segmentSize, SEGMENT_SIZE_BYTES);
             // Write the duration of the media to the Segment
-            this.segmentDuration.data = new EBMLFloat64(this.duration);
+            const duration = this.startTimestamp === Infinity
+                ? 0
+                : this.endTimestamp - this.startTimestamp;
+            this.segmentDuration.data = new EBMLFloat64(duration);
             this.writer.seek(this.ebmlWriter.offsets.get(this.segmentDuration));
             this.ebmlWriter.writeEBML(this.segmentDuration);
             // Fill in SeekHead position data and write it again
@@ -1091,7 +1103,6 @@ export class MatroskaMuxer extends Muxer {
             this.writer.seek(this.ebmlWriter.offsets.get(this.seekHead));
             this.maybeCreateSeekHead(true);
             this.ebmlWriter.writeEBML(this.seekHead);
-            this.writer.seek(endPos);
         }
         release();
     }

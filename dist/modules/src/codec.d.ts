@@ -88,7 +88,7 @@ export declare const extractVideoCodecString: (trackInfo: {
     vp9CodecInfo: Vp9CodecInfo | null;
     av1CodecInfo: Av1CodecInfo | null;
 }) => string;
-export declare const buildAudioCodecString: (codec: AudioCodec, numberOfChannels: number, sampleRate: number) => "pcm-s16" | "pcm-s16be" | "pcm-s24" | "pcm-s24be" | "pcm-s32" | "pcm-s32be" | "pcm-f32" | "pcm-f32be" | "pcm-f64" | "pcm-f64be" | "pcm-u8" | "pcm-s8" | "ulaw" | "alaw" | "opus" | "mp3" | "vorbis" | "flac" | "ac-3" | "ec-3" | "mp4a.40.29" | "mp4a.40.5" | "mp4a.40.2";
+export declare const buildAudioCodecString: (codec: AudioCodec, numberOfChannels: number, sampleRate: number) => "vorbis" | "pcm-s16" | "pcm-s16be" | "pcm-s24" | "pcm-s24be" | "pcm-s32" | "pcm-s32be" | "pcm-f32" | "pcm-f32be" | "pcm-f64" | "pcm-f64be" | "pcm-u8" | "pcm-s8" | "ulaw" | "alaw" | "opus" | "mp3" | "flac" | "ac-3" | "ec-3" | "mp4a.40.29" | "mp4a.40.5" | "mp4a.40.2";
 export type AacCodecInfo = {
     isMpeg2: boolean;
     objectType: number | null;
@@ -98,6 +98,8 @@ export declare const extractAudioCodecString: (trackInfo: {
     codecDescription: Uint8Array | null;
     aacCodecInfo: AacCodecInfo | null;
 }) => string;
+export declare const guessDescriptionForVideo: (decoderConfig: VideoDecoderConfig) => Uint8Array | undefined;
+export declare const guessDescriptionForAudio: (decoderConfig: AudioDecoderConfig) => Uint8Array | undefined | false;
 export declare const OPUS_SAMPLE_RATE = 48000;
 export declare const parsePcmCodec: (codec: PcmAudioCodec) => {
     dataType: "ulaw";
@@ -111,7 +113,7 @@ export declare const parsePcmCodec: (codec: PcmAudioCodec) => {
     silentValue: number;
 } | {
     dataType: "unsigned" | "signed" | "float";
-    sampleSize: 8 | 1 | 2 | 3 | 4;
+    sampleSize: 8 | 1 | 2 | 4 | 3;
     littleEndian: boolean;
     silentValue: number;
 };

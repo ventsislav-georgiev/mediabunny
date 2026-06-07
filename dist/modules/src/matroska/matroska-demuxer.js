@@ -8,7 +8,6 @@
 import { extractAv1CodecInfoFromPacket, extractAvcDecoderConfigurationRecord, extractHevcDecoderConfigurationRecord, extractVp9CodecInfoFromPacket, } from '../codec-data.js';
 import { extractAudioCodecString, extractVideoCodecString, OPUS_SAMPLE_RATE, } from '../codec.js';
 import { Demuxer } from '../demuxer.js';
-import { InputAudioTrack, InputSubtitleTrack, InputVideoTrack, } from '../input-track.js';
 import { AttachedFile, DEFAULT_TRACK_DISPOSITION } from '../metadata.js';
 import { assert, binarySearchLessOrEqual, COLOR_PRIMARIES_MAP_INVERSE, findLastIndex, isIso639Dash2LanguageCode, last, MATRIX_COEFFICIENTS_MAP_INVERSE, normalizeRotation, roundIfAlmostInteger, TRANSFER_CHARACTERISTICS_MAP_INVERSE, UNDETERMINED_LANGUAGE, } from '../misc.js';
 import { EncodedPacket, PLACEHOLDER_DATA } from '../packet.js';
@@ -60,19 +59,14 @@ export class MatroskaDemuxer extends Demuxer {
         this.isWebM = false;
         this.reader = input._reader;
     }
-    async computeDuration() {
-        const tracks = await this.getTracks();
-        const trackDurations = await Promise.all(tracks.map(x => x.computeDuration()));
-        return Math.max(0, ...trackDurations);
-    }
-    async getTracks() {
+    async getTrackBackings() {
         await this.readMetadata();
-        return this.segments.flatMap(segment => segment.tracks.map(track => track.inputTrack));
+        return this.segments.flatMap(segment => segment.tracks.map(track => track.trackBacking));
     }
     async getMimeType() {
         await this.readMetadata();
-        const tracks = await this.getTracks();
-        const codecStrings = await Promise.all(tracks.map(x => x.getCodecParameterString()));
+        const backings = await this.getTrackBackings();
+        const codecStrings = await Promise.all(backings.map(x => x.getDecoderConfig().then(c => c?.codec ?? null)));
         return buildMatroskaMimeType({
             isWebM: this.isWebM,
             hasVideo: this.segments.some(segment => segment.tracks.some(x => x.info?.type === 'video')),
@@ -292,8 +286,6 @@ export class MatroskaDemuxer extends Demuxer {
                 track.defaultDuration = (this.currentSegment.timestampFactor * track.defaultDurationNs) / 1e9;
             }
         }
-        // Put default tracks first
-        this.currentSegment.tracks.sort((a, b) => Number(b.disposition.default) - Number(a.disposition.default));
         // Now, let's distribute the cue points to the tracks
         const idToTrack = new Map(this.currentSegment.tracks.map(x => [x.id, x]));
         // Assign cue points to their respective tracks
@@ -683,14 +675,16 @@ export class MatroskaDemuxer extends Demuxer {
                         cuePoints: [],
                         disposition: {
                             ...DEFAULT_TRACK_DISPOSITION,
+                            primary: false,
                         },
-                        inputTrack: null,
+                        trackBacking: null,
                         codecId: null,
                         codecPrivate: null,
                         defaultDuration: null,
                         defaultDurationNs: null,
                         name: null,
-                        languageCode: UNDETERMINED_LANGUAGE,
+                        languageCode: 'eng', // The default in Matroska
+                        hasLanguageBcp47: false,
                         decodingInstructions: [],
                         info: null,
                     };
@@ -724,11 +718,13 @@ export class MatroskaDemuxer extends Demuxer {
                                 && this.currentTrack.info.displayHeight !== null) {
                                 const num = this.currentTrack.info.displayWidth * this.currentTrack.info.height;
                                 const den = this.currentTrack.info.displayHeight * this.currentTrack.info.width;
-                                if (num > den) {
-                                    this.currentTrack.info.squarePixelWidth = Math.round(this.currentTrack.info.width * num / den);
-                                }
-                                else {
-                                    this.currentTrack.info.squarePixelHeight = Math.round(this.currentTrack.info.height * den / num);
+                                if (num > 0 && den > 0) {
+                                    if (num > den) {
+                                        this.currentTrack.info.squarePixelWidth = Math.round(this.currentTrack.info.width * num / den);
+                                    }
+                                    else {
+                                        this.currentTrack.info.squarePixelHeight = Math.round(this.currentTrack.info.height * den / num);
+                                    }
                                 }
                             }
                             if (this.currentTrack.codecId === CODEC_STRING_MAP.avc) {
@@ -750,13 +746,10 @@ export class MatroskaDemuxer extends Demuxer {
                                 this.currentTrack.info.codecDescription = this.currentTrack.codecPrivate;
                             }
                             const videoTrack = this.currentTrack;
-                            const inputTrack = new InputVideoTrack(this.input, new MatroskaVideoTrackBacking(videoTrack));
-                            this.currentTrack.inputTrack = inputTrack;
+                            this.currentTrack.trackBacking = new MatroskaVideoTrackBacking(videoTrack);
                             this.currentSegment.tracks.push(this.currentTrack);
                         }
-                        else if (this.currentTrack.info.type === 'audio'
-                            && this.currentTrack.info.numberOfChannels !== -1
-                            && this.currentTrack.info.sampleRate !== -1) {
+                        else if (this.currentTrack.info.type === 'audio') {
                             if (codecIdWithoutSuffix === CODEC_STRING_MAP.aac) {
                                 this.currentTrack.info.codec = 'aac';
                                 this.currentTrack.info.aacCodecInfo = {
@@ -826,8 +819,7 @@ export class MatroskaDemuxer extends Demuxer {
                                 }
                             }
                             const audioTrack = this.currentTrack;
-                            const inputTrack = new InputAudioTrack(this.input, new MatroskaAudioTrackBacking(audioTrack));
-                            this.currentTrack.inputTrack = inputTrack;
+                            this.currentTrack.trackBacking = new MatroskaAudioTrackBacking(audioTrack);
                             this.currentSegment.tracks.push(this.currentTrack);
                         }
                         else if (this.currentTrack.info.type === 'subtitle') {
@@ -851,8 +843,7 @@ export class MatroskaDemuxer extends Demuxer {
                                 this.currentTrack.info.codecPrivateText = decoder.decode(this.currentTrack.codecPrivate);
                             }
                             const subtitleTrack = this.currentTrack;
-                            const inputTrack = new InputSubtitleTrack(this.input, new MatroskaSubtitleTrackBacking(subtitleTrack));
-                            this.currentTrack.inputTrack = inputTrack;
+                            this.currentTrack.trackBacking = new MatroskaSubtitleTrackBacking(subtitleTrack);
                             this.currentSegment.tracks.push(this.currentTrack);
                         }
                     }
@@ -893,8 +884,8 @@ export class MatroskaDemuxer extends Demuxer {
                     else if (type === 2) {
                         this.currentTrack.info = {
                             type: 'audio',
-                            numberOfChannels: -1,
-                            sampleRate: -1,
+                            numberOfChannels: 1, // Default value
+                            sampleRate: 8000, // Default value
                             bitDepth: -1,
                             codec: null,
                             codecDescription: null,
@@ -1006,7 +997,7 @@ export class MatroskaDemuxer extends Demuxer {
                 {
                     if (!this.currentTrack)
                         break;
-                    if (this.currentTrack.languageCode !== UNDETERMINED_LANGUAGE) {
+                    if (this.currentTrack.hasLanguageBcp47) {
                         // LanguageBCP47 was present, which takes precedence
                         break;
                     }
@@ -1033,6 +1024,7 @@ export class MatroskaDemuxer extends Demuxer {
                     else {
                         this.currentTrack.languageCode = UNDETERMINED_LANGUAGE;
                     }
+                    this.currentTrack.hasLanguageBcp47 = true;
                 }
                 ;
                 break;
@@ -1760,12 +1752,11 @@ class MatroskaTrackBacking {
     }
     getNumber() {
         const demuxer = this.internalTrack.demuxer;
-        const inputTrack = this.internalTrack.inputTrack;
-        const trackType = inputTrack.type;
+        const trackType = this.internalTrack.trackBacking.getType();
         let number = 0;
         for (const segment of demuxer.segments) {
             for (const track of segment.tracks) {
-                if (track.inputTrack.type === trackType) {
+                if (track.trackBacking.getType() === trackType) {
                     number++;
                 }
                 if (track === this.internalTrack) {
@@ -1781,25 +1772,42 @@ class MatroskaTrackBacking {
     getInternalCodecId() {
         return this.internalTrack.codecId;
     }
-    async computeDuration() {
-        const lastPacket = await this.getPacket(Infinity, { metadataOnly: true });
-        return (lastPacket?.timestamp ?? 0) + (lastPacket?.duration ?? 0);
-    }
     getName() {
         return this.internalTrack.name;
     }
     getLanguageCode() {
         return this.internalTrack.languageCode;
     }
-    async getFirstTimestamp() {
-        const firstPacket = await this.getFirstPacket({ metadataOnly: true });
-        return firstPacket?.timestamp ?? 0;
-    }
     getTimeResolution() {
         return this.internalTrack.segment.timestampFactor;
     }
+    isRelativeToUnixEpoch() {
+        return false;
+    }
     getDisposition() {
         return this.internalTrack.disposition;
+    }
+    getPairingMask() {
+        return 1n;
+    }
+    getBitrate() {
+        return null;
+    }
+    getAverageBitrate() {
+        return null;
+    }
+    async getDurationFromMetadata() {
+        const segment = this.internalTrack.segment;
+        if (segment.duration <= 0) {
+            return null;
+        }
+        let endTimestamp = segment.duration / segment.timestampFactor;
+        const firstPacket = await this.getFirstPacket({ metadataOnly: true });
+        endTimestamp += firstPacket?.timestamp ?? 0;
+        return endTimestamp;
+    }
+    async getLiveRefreshInterval() {
+        return null;
     }
     async getFirstPacket(options) {
         return this.performClusterLookup(null, (cluster) => {
@@ -2086,6 +2094,9 @@ class MatroskaVideoTrackBacking extends MatroskaTrackBacking {
         this.decoderConfigPromise = null;
         this.internalTrack = internalTrack;
     }
+    getType() {
+        return 'video';
+    }
     getCodec() {
         return this.internalTrack.info.codec;
     }
@@ -2130,7 +2141,7 @@ class MatroskaVideoTrackBacking extends MatroskaTrackBacking {
             if (needsPacketForAdditionalInfo) {
                 firstPacket = await this.getFirstPacket({});
             }
-            return {
+            const config = {
                 codec: extractVideoCodecString({
                     width: this.internalTrack.info.width,
                     height: this.internalTrack.info.height,
@@ -2153,11 +2164,15 @@ class MatroskaVideoTrackBacking extends MatroskaTrackBacking {
                 }),
                 codedWidth: this.internalTrack.info.width,
                 codedHeight: this.internalTrack.info.height,
-                displayAspectWidth: this.internalTrack.info.squarePixelWidth,
-                displayAspectHeight: this.internalTrack.info.squarePixelHeight,
                 description: this.internalTrack.info.codecDescription ?? undefined,
                 colorSpace: this.internalTrack.info.colorSpace ?? undefined,
             };
+            if (this.internalTrack.info.width !== this.internalTrack.info.squarePixelWidth
+                || this.internalTrack.info.height !== this.internalTrack.info.squarePixelHeight) {
+                config.displayAspectWidth = this.internalTrack.info.squarePixelWidth;
+                config.displayAspectHeight = this.internalTrack.info.squarePixelHeight;
+            }
+            return config;
         })();
     }
 }
@@ -2166,6 +2181,9 @@ class MatroskaAudioTrackBacking extends MatroskaTrackBacking {
         super(internalTrack);
         this.decoderConfig = null;
         this.internalTrack = internalTrack;
+    }
+    getType() {
+        return 'audio';
     }
     getCodec() {
         return this.internalTrack.info.codec;
@@ -2196,6 +2214,12 @@ class MatroskaSubtitleTrackBacking extends MatroskaTrackBacking {
     constructor(internalTrack) {
         super(internalTrack);
         this.internalTrack = internalTrack;
+    }
+    getType() {
+        return 'subtitle';
+    }
+    async getDecoderConfig() {
+        return null;
     }
     getCodec() {
         return this.internalTrack.info.codec;

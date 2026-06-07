@@ -18,13 +18,15 @@ export class AdtsMuxer extends Muxer {
         this.headerBitstream = null;
         this.inputIsAdts = null;
         this.format = format;
-        this.writer = output._writer;
     }
     async start() {
+        const release = await this.mutex.acquire();
+        this.writer = await this.output._getRootWriter(true);
         if (!metadataTagsAreEmpty(this.output._metadataTags)) {
             const id3Writer = new Id3V2Writer(this.writer);
             id3Writer.writeId3V2Tag(this.output._metadataTags);
         }
+        release();
     }
     async getMimeType() {
         return 'audio/aac';
@@ -35,7 +37,7 @@ export class AdtsMuxer extends Muxer {
     async addEncodedAudioPacket(track, packet, meta) {
         const release = await this.mutex.acquire();
         try {
-            this.validateAndNormalizeTimestamp(track, packet.timestamp, packet.type === 'key');
+            this.validateTimestamp(track, packet.timestamp, packet.type === 'key');
             // First packet - determine input format from metadata
             if (this.inputIsAdts === null) {
                 validateAudioChunkMetadata(meta);

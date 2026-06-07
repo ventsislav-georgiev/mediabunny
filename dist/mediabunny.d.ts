@@ -75,6 +75,30 @@ export declare const ALL_TRACK_TYPES: readonly ["video", "audio", "subtitle"];
 export declare type AnyIterable<T> = Iterable<T> | AsyncIterable<T>;
 
 /**
+ * This target writes to a `WritableStream<Uint8Array>`, meaning all writes are necessarily append-only and involve no
+ * seeking. Great for streaming data to a source that can only accept sequential data, like an HTTP server processing
+ * an incoming upload.
+ *
+ * Note that using this target *requires* that the underlying format write data sequentially. Not all formats do this,
+ * and this target will throw for the formats that don't. Check the guide for more.
+ *
+ * @group Output targets
+ * @public
+ */
+export declare class AppendOnlyStreamTarget extends Target {
+    constructor(writable: WritableStream<Uint8Array>);
+}
+
+/**
+ * Helper function for use in {@link InputTrackQuery.sortBy}, used to describe sorting tracks by a numeric property in
+ * ascending order. `null` and `undefined` are accepted too and are last in the order (sorted to the end).
+ *
+ * @group Input files & tracks
+ * @public
+ */
+export declare const asc: (value: number | null | undefined) => number;
+
+/**
  * A file attached to a media file.
  *
  * @group Metadata tags
@@ -143,16 +167,18 @@ export declare class AudioBufferSink {
      * Returns null if the timestamp is before the track's first timestamp.
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    getBuffer(timestamp: number): Promise<WrappedAudioBuffer | null>;
+    getBuffer(timestamp: number, options?: PacketRetrievalOptions): Promise<WrappedAudioBuffer | null>;
     /**
      * Creates an async iterator that yields audio buffers of this track in presentation order. This method
      * will intelligently pre-decode a few buffers ahead to enable fast iteration.
      *
      * @param startTimestamp - The timestamp in seconds at which to start yielding buffers (inclusive).
      * @param endTimestamp - The timestamp in seconds at which to stop yielding buffers (exclusive).
+     * @param options - Options used for the underlying packet retrieval.
      */
-    buffers(startTimestamp?: number, endTimestamp?: number): AsyncGenerator<WrappedAudioBuffer, void, unknown>;
+    buffers(startTimestamp?: number, endTimestamp?: number, options?: PacketRetrievalOptions): AsyncGenerator<WrappedAudioBuffer, void, unknown>;
     /**
      * Creates an async iterator that yields an audio buffer for each timestamp in the argument. This method
      * uses an optimized decoding pipeline if these timestamps are monotonically sorted, decoding each packet at most
@@ -160,8 +186,9 @@ export declare class AudioBufferSink {
      * yield null if no buffer is available for a given timestamp.
      *
      * @param timestamps - An iterable or async iterable of timestamps in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    buffersAtTimestamps(timestamps: AnyIterable<number>): AsyncGenerator<WrappedAudioBuffer | null, void, unknown>;
+    buffersAtTimestamps(timestamps: AnyIterable<number>, options?: PacketRetrievalOptions): AsyncGenerator<WrappedAudioBuffer | null, void, unknown>;
 }
 
 /**
@@ -222,6 +249,10 @@ export declare type AudioEncodingConfig = {
      * be provided. Required for compressed audio codecs, unused for PCM codecs.
      */
     bitrate?: number | Quality;
+    /**
+     * Optional transformations to apply to the audio samples before they are passed to the encoder.
+     */
+    transform?: AudioTransformOptions;
     /** Called for each successfully encoded packet. Both the packet and the encoding metadata are passed. */
     onEncodedPacket?: (packet: EncodedPacket, meta: EncodedAudioChunkMetadata | undefined) => unknown;
     /**
@@ -267,7 +298,7 @@ export declare class AudioSample implements Disposable {
      * [`AudioData`](https://developer.mozilla.org/en-US/docs/Web/API/AudioData) or from raw bytes specified in
      * {@link AudioSampleInit}.
      */
-    constructor(init: AudioData | AudioSampleInit);
+    constructor(init: AudioData | AudioSampleInit | AudioSampleResource);
     /** Returns the number of bytes required to hold the audio sample's data as specified by the given options. */
     allocationSize(options: AudioSampleCopyToOptions): number;
     /** Copies the audio sample's data to an ArrayBuffer or ArrayBufferView as specified by the given options. */
@@ -342,6 +373,38 @@ export declare type AudioSampleInit = {
 };
 
 /**
+ * Abstract base class for custom audio sample resources. Implement this class to provide custom backing
+ * for AudioSample instances.
+ * @group Samples
+ * @public
+ */
+export declare abstract class AudioSampleResource {
+    /**
+     * Returns the audio sample format.
+     * [See sample formats](https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format)
+     */
+    abstract getFormat(): AudioSampleFormat;
+    /** Returns the audio sample rate in hertz. */
+    abstract getSampleRate(): number;
+    /** Returns the number of audio frames in the sample, per channel. */
+    abstract getNumberOfFrames(): number;
+    /** Returns the number of audio channels. */
+    abstract getNumberOfChannels(): number;
+    /** Returns the presentation timestamp of the sample in seconds. */
+    abstract getTimestamp(): number;
+    /**
+     * Closes this resource, releasing held resources. Called automatically when the last {@link AudioSample} using this
+     * resource is closed.
+     */
+    abstract close(): void;
+    /**
+     * Returns the audio sample data for the plane given by `planeIndex`. The audio data must be in the format returned
+     * by `getFormat()`. For interleaved formats, there is only one plane.
+     */
+    abstract getDataPlane(planeIndex: number): Uint8Array;
+}
+
+/**
  * Sink for retrieving decoded audio samples from an audio track.
  * @group Media sinks
  * @public
@@ -355,25 +418,31 @@ export declare class AudioSampleSink extends BaseMediaSampleSink<AudioSample> {
      * Returns null if the timestamp is before the track's first timestamp.
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    getSample(timestamp: number): Promise<AudioSample | null>;
+    getSample(timestamp: number, options?: PacketRetrievalOptions): Promise<AudioSample | null>;
     /**
      * Creates an async iterator that yields the audio samples of this track in presentation order. This method
      * will intelligently pre-decode a few samples ahead to enable fast iteration.
      *
      * @param startTimestamp - The timestamp in seconds at which to start yielding samples (inclusive).
      * @param endTimestamp - The timestamp in seconds at which to stop yielding samples (exclusive).
+     * @param options - Options used for the underlying packet retrieval.
      */
-    samples(startTimestamp?: number, endTimestamp?: number): AsyncGenerator<AudioSample, void, unknown>;
+    samples(startTimestamp?: number, endTimestamp?: number, options?: PacketRetrievalOptions): AsyncGenerator<AudioSample, void, unknown>;
     /**
      * Creates an async iterator that yields an audio sample for each timestamp in the argument. This method
      * uses an optimized decoding pipeline if these timestamps are monotonically sorted, decoding each packet at most
      * once, and is therefore more efficient than manually getting the sample for every timestamp. The iterator may
      * yield null if no sample is available for a given timestamp.
      *
+     * This method is good for sparse access of media data. If you want primarily sequential media access, prefer
+     * {@link AudioSampleSink.samples} instead.
+     *
      * @param timestamps - An iterable or async iterable of timestamps in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    samplesAtTimestamps(timestamps: AnyIterable<number>): AsyncGenerator<AudioSample | null, void, unknown>;
+    samplesAtTimestamps(timestamps: AnyIterable<number>, options?: PacketRetrievalOptions): AsyncGenerator<AudioSample | null, void, unknown>;
 }
 
 /**
@@ -415,6 +484,30 @@ export declare abstract class AudioSource extends MediaSource_2 {
 export declare type AudioTrackMetadata = BaseTrackMetadata & {};
 
 /**
+ * Options for transforming audio samples before encoding.
+ * @group Encoding
+ * @public
+ */
+export declare type AudioTransformOptions = {
+    /** The desired number of output channels to up/downmix to. */
+    numberOfChannels?: number;
+    /** The desired output sample rate in hertz to resample to. */
+    sampleRate?: number;
+    /**
+     * The desired sample format (and therefore bit depth) of the audio samples before they are passed to the encoder.
+     * Can be used to control bit depth with certain output codecs such as FLAC.
+     */
+    sampleFormat?: 'u8' | 's16' | 's32' | 'f32';
+    /**
+     * Allows for custom user-defined processing of audio samples, e.g. for applying audio effects or timestamp
+     * modifications. Called for each audio sample after resampling and remixing.
+     *
+     * Must return an {@link AudioSample}, an array of them, or `null` for dropping the sample.
+     */
+    process?: (sample: AudioSample) => MaybePromise<AudioSample | AudioSample[] | null>;
+};
+
+/**
  * Base class for decoded media sample sinks.
  * @group Media sinks
  * @public
@@ -449,6 +542,22 @@ export declare type BaseTrackMetadata = {
      * If you're not fully sure, make sure to add a buffer of around 33% to make sure you stay below the maximum.
      */
     maximumPacketCount?: number;
+    /**
+     * Whether the timestamps of this track are relative to the Unix epoch (January 1, 1970, 00:00:00 UTC). When `true`,
+     * each timestamp maps to a definitive point in time.
+     */
+    isRelativeToUnixEpoch?: boolean;
+    /**
+     * Defines the group(s) this track is a part of. Group assignment determines track pairability, determining which
+     * tracks can be presented together with other tracks. This is needed for configuring things like HLS master
+     * playlists.
+     *
+     * Two groups are considered pairable if they are in the same group but are of different {@link TrackType}, or if
+     * they are in two separate groups that have been paired with each other.
+     *
+     * If left blank, a track is automatically assigned to {@link Output.defaultTrackGroup}.
+     */
+    group?: OutputTrackGroup | OutputTrackGroup[];
 };
 
 /**
@@ -474,6 +583,12 @@ export declare class BlobSource extends Source {
 export declare type BlobSourceOptions = {
     /** The maximum number of bytes the cache is allowed to hold in memory. Defaults to 8 MiB. */
     maxCacheSize?: number;
+    /**
+     * Defaults to `true`. When `true`, Mediabunny will acquire a `ReadableStream` reader internally to efficiently read
+     * data from the blob. Since this can lead to errors in some (very) rare cases due to browser bugs, you can set this
+     * field to `false` to try a slower but more stable reading method.
+     */
+    useStreamReader?: boolean;
 };
 
 /**
@@ -499,7 +614,46 @@ export { BufferSource_2 as BufferSource }
 export declare class BufferTarget extends Target {
     /** Stores the final output buffer. Until the output is finalized, this will be `null`. */
     buffer: ArrayBuffer | null;
+    /** Creates a new {@link BufferTarget}. The buffer holding the data will be created and managed internally. */
+    constructor(options?: BufferTargetOptions);
 }
+
+/**
+ * Options for {@link BufferTarget}.
+ * @group Output targets
+ * @public
+ */
+export declare type BufferTargetOptions = {
+    /**
+     * Called once the target has been finalized, with the complete output buffer. If you return a promise, it will be
+     * used to apply backpressure internally.
+     *
+     * One use for this callback is for uploading to a server where the full buffer must be known before
+     * sending (e.g. S3 PutObject) and stream-uploading is not an option.
+     */
+    onFinalize?: (buffer: ArrayBuffer) => MaybePromise<unknown>;
+};
+
+/**
+ * Checks if the browser is able to decode the given codec.
+ * @group Decoding
+ * @public
+ */
+export declare const canDecode: (codec: MediaCodec) => false | Promise<boolean>;
+
+/**
+ * Checks if the browser is able to decode the given audio codec with the given parameters.
+ * @group Decoding
+ * @public
+ */
+export declare const canDecodeAudio: (codec: AudioCodec, options?: SetOptional<AudioDecoderConfig, "codec" | "numberOfChannels" | "sampleRate">) => Promise<boolean>;
+
+/**
+ * Checks if the browser is able to decode the given video codec with the given parameters.
+ * @group Decoding
+ * @public
+ */
+export declare const canDecodeVideo: (codec: VideoCodec, options?: SetOptional<VideoDecoderConfig, "codec">) => Promise<boolean>;
 
 /**
  * Checks if the browser is able to encode the given codec.
@@ -556,25 +710,31 @@ export declare class CanvasSink {
      * timestamp. Returns null if the timestamp is before the track's first timestamp.
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    getCanvas(timestamp: number): Promise<WrappedCanvas | null>;
+    getCanvas(timestamp: number, options?: PacketRetrievalOptions): Promise<WrappedCanvas | null>;
     /**
      * Creates an async iterator that yields canvases with the video frames of this track in presentation order. This
      * method will intelligently pre-decode a few frames ahead to enable fast iteration.
      *
      * @param startTimestamp - The timestamp in seconds at which to start yielding canvases (inclusive).
      * @param endTimestamp - The timestamp in seconds at which to stop yielding canvases (exclusive).
+     * @param options - Options used for the underlying packet retrieval.
      */
-    canvases(startTimestamp?: number, endTimestamp?: number): AsyncGenerator<WrappedCanvas, void, unknown>;
+    canvases(startTimestamp?: number, endTimestamp?: number, options?: PacketRetrievalOptions): AsyncGenerator<WrappedCanvas, void, unknown>;
     /**
      * Creates an async iterator that yields a canvas for each timestamp in the argument. This method uses an optimized
      * decoding pipeline if these timestamps are monotonically sorted, decoding each packet at most once, and is
      * therefore more efficient than manually getting the canvas for every timestamp. The iterator may yield null if
      * no frame is available for a given timestamp.
      *
+     * This method is good for sparse access of media data. If you want primarily sequential media access, prefer
+     * {@link CanvasSink.canvases} instead.
+     *
      * @param timestamps - An iterable or async iterable of timestamps in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    canvasesAtTimestamps(timestamps: AnyIterable<number>): AsyncGenerator<WrappedCanvas | null, void, unknown>;
+    canvasesAtTimestamps(timestamps: AnyIterable<number>, options?: PacketRetrievalOptions): AsyncGenerator<WrappedCanvas | null, void, unknown>;
 }
 
 /**
@@ -652,6 +812,63 @@ export declare class CanvasSource extends VideoSource {
 }
 
 /**
+ * Creates a single Common Media Application Format (CMAF) segment. An init segment will be written to the
+ * {@link Target} specified in {@link OutputOptions.initTarget}. Supports most codecs.
+ * @group Output formats
+ * @public
+ */
+export declare class CmafOutputFormat extends IsobmffOutputFormat {
+    /** Creates a new {@link CmafOutputFormat} configured with the specified `options`. */
+    constructor(options?: CmafOutputFormatOptions);
+    get fileExtension(): string;
+    get mimeType(): string;
+    getSupportedCodecs(): MediaCodec[];
+}
+
+/**
+ * CMAF-specific output options.
+ * @group Output formats
+ * @public
+ */
+export declare type CmafOutputFormatOptions = Omit<IsobmffOutputFormatOptions, 'fastStart'> & {
+    /**
+     * Controls the minimum duration of each fragment, in seconds. New fragments will only be created when the current
+     * fragment is longer than this value. Defaults to `Infinity`, meaning the file will contain only one fragment.
+     */
+    minimumFragmentDuration?: number;
+};
+
+/**
+ * Utility class for running async functions in parallel up to a certain level of parallelism. Can be used to apply
+ * backpressure only if the concurrency level would be exceeded.
+ *
+ * @group Miscellaneous
+ * @public
+ */
+export declare class ConcurrentRunner {
+    /**
+     * The maximum number of in-flight promises. You can also think of it as the "high water mark".
+     * You can set this value to dynamically change the level of parallelism.
+     */
+    parallelism: number;
+    constructor(parallelism: number);
+    /** Whether any function has errored. The runner is effectively bricked if this is `true`, by design. */
+    get errored(): boolean;
+    /** The number of tasks currently running. */
+    get inFlightCount(): number;
+    /**
+     * Schedules an async function to be run. If the maximum allowed level of parallelism has not yet been reached,
+     * the function will be executed immediately and `run()` will resolve immediately. Otherwise, the function will be
+     * called as soon as any currently-running function finishes, and `run()` will only resolve then.
+     *
+     * Throws if the runner is errored.
+     */
+    run(fn: () => Promise<unknown>): Promise<void>;
+    /** Waits for all currently running functions to finish. Throws if the runner is errored. */
+    flush(): Promise<void>;
+}
+
+/**
  * Represents a media file conversion process, used to convert one media file into another. In addition to conversion,
  * this class can be used to resize and rotate video, resample audio, drop tracks, or trim to a specific time range.
  * @group Conversion
@@ -663,19 +880,27 @@ export declare class Conversion {
     /** The output file. */
     readonly output: Output;
     /**
-     * A callback that is fired whenever the conversion progresses. Returns a number between 0 and 1, indicating the
-     * completion of the conversion. Note that a progress of 1 doesn't necessarily mean the conversion is complete;
-     * the conversion is complete once `execute()` resolves.
+     * A callback that is fired whenever the conversion progresses. Gets passed as first argument a number between
+     * 0 and 1, indicating the completion of the conversion. Note that a progress of 1 doesn't necessarily mean the
+     * conversion is complete; the conversion is complete once `execute()` resolves.
+     *
+     * As second argument, this callback receives the input time in seconds that has been processed.
      *
      * In order for progress to be computed, this property must be set before `execute` is called.
      */
-    onProgress?: (progress: number) => unknown;
+    onProgress?: (progress: number, processedTime: number) => unknown;
     /**
      * Whether this conversion, as it has been configured, is valid and can be executed. If this field is `false`, check
      * the `discardedTracks` field for reasons.
+     *
+     * Note: a conversion having discarded tracks does not automatically mean it is invalid; if the remaining, utilized
+     * tracks make for a valid output file, the conversion is still allowed.
      */
     isValid: boolean;
-    /** The list of tracks that are included in the output file. */
+    /**
+     * The list of tracks that are included in the output file. When fan-out is used, the same track appears in this
+     * array multiple times.
+     */
     readonly utilizedTracks: InputTrack[];
     /** The list of tracks from the input file that have been discarded, alongside the discard reason. */
     readonly discardedTracks: DiscardedTrack[];
@@ -683,15 +908,6 @@ export declare class Conversion {
     static init(options: ConversionOptions): Promise<Conversion>;
     /** Creates a new Conversion instance (duh). */
     private constructor();
-    /**
-     * Adds an external subtitle track to the output. This can be called after `init()` but before `execute()`.
-     * This is useful for adding subtitle tracks from separate files that are not part of the input video.
-     *
-     * @param source - The subtitle source to add
-     * @param metadata - Optional metadata for the subtitle track
-     * @param contentProvider - Optional async function that will be called after the output starts to add content to the subtitle source
-     */
-    addExternalSubtitleTrack(source: SubtitleSource, metadata?: SubtitleTrackMetadata, contentProvider?: () => Promise<void>): void;
     /**
      * Executes the conversion process. Resolves once conversion is complete.
      *
@@ -703,8 +919,6 @@ export declare class Conversion {
      * Does nothing if the conversion is already complete.
      */
     cancel(): Promise<void>;
-    /** Converts or passes through a subtitle track into the output format. */
-    _processSubtitleTrack(track: InputSubtitleTrack, trackOptions: ConversionSubtitleOptions): Promise<void>;
 }
 
 /**
@@ -719,6 +933,13 @@ export declare type ConversionAudioOptions = {
     numberOfChannels?: number;
     /** The desired sample rate of the output audio, in hertz. */
     sampleRate?: number;
+    /**
+     * The desired sample format (and therefore bit depth) of the audio samples before they are passed to the encoder.
+     * Can be used to control bit depth with certain output codecs such as FLAC.
+     *
+     * Setting this field forces audio transcoding.
+     */
+    sampleFormat?: 'u8' | 's16' | 's32' | 'f32';
     /** The desired output audio codec. */
     codec?: AudioCodec;
     /** The desired bitrate of the output audio. */
@@ -747,6 +968,13 @@ export declare type ConversionAudioOptions = {
      * encoder configuration.
      */
     processedSampleRate?: number;
+    /**
+     * Defines the group(s) the output track is a part of. For more, see {@link BaseTrackMetadata.group}.
+     *
+     * If left blank, tracks will internally be assigned to groups such that the output track pairability graph exactly
+     * matches the input track pairability graph.
+     */
+    group?: OutputTrackGroup | OutputTrackGroup[];
 };
 
 /**
@@ -770,33 +998,43 @@ export declare type ConversionOptions = {
     /** The output file. */
     output: Output;
     /**
+     * Defines which input tracks are used for conversion. Defaults to `'all'` unless the input is an HLS input, in
+     * which case it defaults to `'primary'`.
+     *
+     * - `'all'`: All input tracks are eligible for conversion.
+     * - `'primary'`: Only the primary video and audio track from the input are eligible for conversion.
+     */
+    tracks?: 'all' | 'primary';
+    /**
      * Video-specific options. When passing an object, the same options are applied to all video tracks. When passing a
      * function, it will be invoked for each video track and is expected to return or resolve to the options
      * for that specific track. The function is passed an instance of {@link InputVideoTrack} as well as a number `n`,
      * which is the 1-based index of the track in the list of all video tracks. Using `n` is deprecated, prefer the
      * identical `track.number` instead.
+     *
+     * When passing an array of a function that returns an array, one output track per array element will be created,
+     * allowing for "fan-out". Useful for creating multiple variants from a single track, for example with different
+     * resolutions.
      */
-    video?: ConversionVideoOptions | ((track: InputVideoTrack, n: number) => MaybePromise<ConversionVideoOptions | undefined>);
+    video?: ConversionVideoOptions | ConversionVideoOptions[] | ((track: InputVideoTrack, n: number) => MaybePromise<ConversionVideoOptions | ConversionVideoOptions[] | undefined>);
     /**
      * Audio-specific options. When passing an object, the same options are applied to all audio tracks. When passing a
      * function, it will be invoked for each audio track and is expected to return or resolve to the options
      * for that specific track. The function is passed an instance of {@link InputAudioTrack} as well as a number `n`,
      * which is the 1-based index of the track in the list of all audio tracks. Using `n` is deprecated, prefer the
      * identical `track.number` instead.
+     *
+     * When passing an array of a function that returns an array, one output track per array element will be created,
+     * allowing for "fan-out". Useful for creating multiple variants from a single track, for example with different
+     * bitrates.
      */
-    audio?: ConversionAudioOptions | ((track: InputAudioTrack, n: number) => MaybePromise<ConversionAudioOptions | undefined>);
-    /**
-     * Subtitle-specific options. When passing an object, the same options are applied to all subtitle tracks. When passing a
-     * function, it will be invoked for each subtitle track and is expected to return or resolve to the options
-     * for that specific track. The function is passed an instance of {@link InputSubtitleTrack} as well as a number `n`,
-     * which is the 1-based index of the track in the list of all subtitle tracks.
-     */
-    subtitle?: ConversionSubtitleOptions | ((track: InputSubtitleTrack, n: number) => MaybePromise<ConversionSubtitleOptions | undefined>);
+    audio?: ConversionAudioOptions | ConversionAudioOptions[] | ((track: InputAudioTrack, n: number) => MaybePromise<ConversionAudioOptions | ConversionAudioOptions[] | undefined>);
     /** Options to trim the input file. */
     trim?: {
         /**
          * The time in the input file in seconds at which the output file should start. Must be less than `end`.
-         * When omitted, defaults to the start timestamp of the input or to 0, whichever is higher.
+         * When omitted, defaults to the earliest start timestamp of the non-discarded tracks, or to 0, whichever
+         * is higher.
          */
         start?: number;
         /**
@@ -819,18 +1057,6 @@ export declare type ConversionOptions = {
      * want to keep the console output clean.
      */
     showWarnings?: boolean;
-};
-
-/**
- * Subtitle-specific options.
- * @group Conversion
- * @public
- */
-export declare type ConversionSubtitleOptions = {
-    /** If `true`, all subtitle tracks will be discarded and will not be present in the output. */
-    discard?: boolean;
-    /** The desired output subtitle codec. */
-    codec?: SubtitleCodec;
 };
 
 /**
@@ -866,7 +1092,7 @@ export declare type ConversionVideoOptions = {
      */
     rotate?: Rotation;
     /**
-     * Defaults to `true`. When enabaled, Mediabunny will use the rotation metadata in the output file to perform video
+     * Defaults to `true`. When enabled, Mediabunny will use the rotation metadata in the output file to perform video
      * rotation whenever possible. Set this field to `false` if you want to ensure the output file does not make use of
      * rotation metadata and that any rotation is baked into the video frames directly.
      */
@@ -875,16 +1101,7 @@ export declare type ConversionVideoOptions = {
      * Specifies the rectangular region of the input video to crop to. The crop region will automatically be clamped to
      * the dimensions of the input video track. Cropping is performed after rotation but before resizing.
      */
-    crop?: {
-        /** The distance in pixels from the left edge of the source frame to the left edge of the crop rectangle. */
-        left: number;
-        /** The distance in pixels from the top edge of the source frame to the top edge of the crop rectangle. */
-        top: number;
-        /** The width in pixels of the crop rectangle. */
-        width: number;
-        /** The height in pixels of the crop rectangle. */
-        height: number;
-    };
+    crop?: CropRectangle;
     /**
      * The desired frame rate of the output video, in hertz. If not specified, the original input frame rate will
      * be used (which may be variable).
@@ -920,15 +1137,15 @@ export declare type ConversionVideoOptions = {
      * timestamp modifications. Will be called for each input video sample after transformations and frame rate
      * corrections.
      *
-     * Must return a {@link VideoSample} or a `CanvasImageSource`, an array of them, or `null` for dropping the frame.
-     * When non-timestamped data is returned, the timestamp and duration from the source sample will be used. Rotation
-     * metadata of the returned sample will be ignored.
+     * Must return a {@link VideoSample}, a {@link VideoSampleResource} or a `CanvasImageSource`, an array of them, or
+     * `null` for dropping the frame. When non-timestamped data is returned, the timestamp and duration from the source
+     * sample will be used. Rotation metadata of the returned sample will be ignored.
      *
      * This function can also be used to manually resize frames. When doing so, you should signal the post-process
      * dimensions using the `processedWidth` and `processedHeight` fields, which enables the encoder to better know what
      * to expect. If these fields aren't set, Mediabunny will assume you won't perform any resizing.
      */
-    process?: (sample: VideoSample) => MaybePromise<CanvasImageSource | VideoSample | (CanvasImageSource | VideoSample)[] | null>;
+    process?: (sample: VideoSample) => MaybePromise<CanvasImageSource | VideoSample | VideoSampleResource | (CanvasImageSource | VideoSample | VideoSampleResource)[] | null>;
     /**
      * An optional hint specifying the width of video samples returned by the `process` function, for better
      * encoder configuration.
@@ -939,6 +1156,13 @@ export declare type ConversionVideoOptions = {
      * encoder configuration.
      */
     processedHeight?: number;
+    /**
+     * Defines the group(s) the output track is a part of. For more, see {@link BaseTrackMetadata.group}.
+     *
+     * If left blank, tracks will internally be assigned to groups such that the output track pairability graph exactly
+     * matches the input track pairability graph.
+     */
+    group?: OutputTrackGroup | OutputTrackGroup[];
 };
 
 /**
@@ -1008,6 +1232,65 @@ export declare abstract class CustomAudioEncoder {
 }
 
 /**
+ * A custom multi-file source where each file is uniquely identified by a {@link FilePath} and can be resolved to
+ * an arbitrary {@link Source}.
+ *
+ * @public
+ * @group Input sources
+ */
+export declare class CustomPathedSource extends PathedSource {
+}
+
+/**
+ * A general-purpose, callback-driven source that can get its data from anywhere. Use this source to implement your own
+ * custom source if the other sources don't cover your case.
+ * @group Input sources
+ * @public
+ */
+export declare class CustomSource extends Source {
+    /** Creates a new {@link CustomSource} whose behavior is specified by `options`.  */
+    constructor(options: CustomSourceOptions);
+}
+
+/**
+ * Options for defining a {@link CustomSource}.
+ * @group Input sources
+ * @public
+ */
+export declare type CustomSourceOptions = {
+    /**
+     * Called when the size of the entire file is requested. Must return or resolve to the size in bytes. This function
+     * is guaranteed to be called before `read`.
+     */
+    getSize: () => MaybePromise<number>;
+    /**
+     * Called when data is requested. Must return or resolve to the bytes from the specified byte range, or a stream
+     * that yields these bytes.
+     *
+     * You are guaranteed that `0 <= start < end < fileSize`.
+     */
+    read: (start: number, end: number) => MaybePromise<Uint8Array | ReadableStream<Uint8Array>>;
+    /**
+     * Called when the {@link Input} driven by this source is disposed.
+     */
+    dispose?: () => unknown;
+    /** The maximum number of bytes the cache is allowed to hold in memory. Defaults to 8 MiB. */
+    maxCacheSize?: number;
+    /**
+     * Specifies the prefetch profile that the reader should use with this source. A prefetch profile specifies the
+     * pattern with which bytes outside of the requested range are preloaded to reduce latency for future reads.
+     *
+     * - `'none'` (default): No prefetching; only the data needed in the moment is requested.
+     * - `'fileSystem'`: File system-optimized prefetching: a small amount of data is prefetched bidirectionally,
+     * aligned with page boundaries.
+     * - `'network'`: Network-optimized prefetching, or more generally, prefetching optimized for any high-latency
+     * environment: tries to minimize the amount of read calls and aggressively prefetches data when sequential access
+     * patterns are detected.
+     */
+    prefetchProfile?: 'none' | 'fileSystem' | 'network';
+};
+
+/**
  * Base class for custom video decoders. To add your own custom video decoder, extend this class, implement the
  * abstract methods and static `supports` method, and register the decoder using {@link registerDecoder}.
  * @group Custom coders
@@ -1058,6 +1341,24 @@ export declare abstract class CustomVideoEncoder {
 }
 
 /**
+ * Recursively makes all properties of T readonly.
+ * @group Miscellaneous
+ * @public
+ */
+export declare type DeepReadonly<T> = T extends object ? {
+    readonly [K in keyof T]: DeepReadonly<T[K]>;
+} : T;
+
+/**
+ * Helper function for use in {@link InputTrackQuery.sortBy}, used to describe sorting tracks by a numeric property in
+ * descending order. `null` and `undefined` are accepted too and are last in the order (sorted to the end).
+ *
+ * @group Input files & tracks
+ * @public
+ */
+export declare const desc: (value: number | null | undefined) => number;
+
+/**
  * An input track that was discarded (excluded) from a {@link Conversion} alongside the discard reason.
  * @group Conversion
  * @public
@@ -1080,6 +1381,24 @@ export declare type DiscardedTrack = {
      * you requested a codec that cannot be contained within the output format.
      */
     reason: 'discarded_by_user' | 'max_track_count_reached' | 'max_track_count_of_type_reached' | 'unknown_source_codec' | 'undecodable_source_codec' | 'no_encodable_target_codec';
+    /** The options that were provided for this track, or `{}` if none were provided. */
+    trackOptions: ConversionVideoOptions | ConversionAudioOptions;
+};
+
+/**
+ * Options for retrieving media duration from metadata.
+ * @group Input files & tracks
+ * @public
+ */
+export declare type DurationMetadataRequestOptions = {
+    /**
+     * When the underlying media is live, querying the duration will, by default, wait until the live stream has ended.
+     * Setting this field to `true` skips that wait and returns the current duration of the stream. When the media isn't
+     * live, this field has no effect.
+     *
+     * See also {@link PacketRetrievalOptions.skipLiveWait}.
+     */
+    skipLiveWait?: boolean;
 };
 
 /**
@@ -1237,9 +1556,11 @@ export declare class EncodedPacketSink {
     constructor(track: InputTrack);
     /**
      * Retrieves the track's first packet (in decode order), or null if it has no packets. The first packet is very
-     * likely to be a key packet.
+     * likely to be a key packet, but it doesn't have to be.
      */
     getFirstPacket(options?: PacketRetrievalOptions): Promise<EncodedPacket | null>;
+    /** Retrieves the track's first key packet (in decode order), or null if it has no key packets. */
+    getFirstKeyPacket(options?: PacketRetrievalOptions): Promise<EncodedPacket | null>;
     /**
      * Retrieves the packet corresponding to the given timestamp, in seconds. More specifically, returns the last packet
      * (in presentation order) with a start timestamp less than or equal to the given timestamp. This method can be
@@ -1278,7 +1599,7 @@ export declare class EncodedPacketSink {
      * method will intelligently preload packets based on the speed of the consumer.
      *
      * @param startPacket - (optional) The packet from which iteration should begin. This packet will also be yielded.
-     * @param endTimestamp - (optional) The timestamp at which iteration should end. This packet will _not_ be yielded.
+     * @param endPacket - (optional) The packet at which iteration should end. This packet will _not_ be yielded.
      */
     packets(startPacket?: EncodedPacket, endPacket?: EncodedPacket, options?: PacketRetrievalOptions): AsyncGenerator<EncodedPacket, void, unknown>;
 }
@@ -1305,6 +1626,48 @@ export declare class EncodedVideoPacketSource extends VideoSource {
 }
 
 /**
+ * A class that manages event listeners and dispatches events to them.
+ *
+ * @group Miscellaneous
+ * @public
+ */
+export declare class EventEmitter<TEvents extends Record<string, unknown>> {
+    /** Registers a listener for the given event. */
+    on<K extends keyof TEvents>(event: K, listener: (data: TEvents[K]) => unknown, options?: EventListenerOptions_2): () => void;
+}
+
+/**
+ * Options for {@link EventEmitter.on}.
+ *
+ * @group Miscellaneous
+ * @public
+ */
+declare type EventListenerOptions_2 = {
+    /** If `true`, the listener will be automatically removed after being called once. Defaults to `false`. */
+    once?: boolean;
+};
+export { EventListenerOptions_2 as EventListenerOptions }
+
+/**
+ * A path to a file. File paths can be relative or absolute, and be local paths or full URLs. Paths must be POSIX-like,
+ * using `/` as the separator.
+ *
+ * Examples of valid paths:
+ * - `'video.mp4'`
+ * - `'path/to/video.mp4'`
+ * - `'./video.mp4'`
+ * - `'../video.mp4'`
+ * - `'/path/to/video.mp4'`
+ * - `'https://example.com/video.mp4'`
+ * - `'file:///home/user/video.mp4'`
+ * - `'video.mp4?key=foo'`
+ *
+ * @group Miscellaneous
+ * @public
+ */
+export declare type FilePath = string;
+
+/**
  * A source backed by a path to a file. Intended for server-side usage in Node, Bun, or Deno.
  *
  * Make sure to call `.dispose()` on the corresponding {@link Input} when done to explicitly free the internal file
@@ -1312,7 +1675,7 @@ export declare class EncodedVideoPacketSource extends VideoSource {
  * @group Input sources
  * @public
  */
-export declare class FilePathSource extends Source {
+export declare class FilePathSource extends PathedSource {
     /** Creates a new {@link FilePathSource} backed by the file at the specified file path. */
     constructor(filePath: string, options?: FilePathSourceOptions);
 }
@@ -1390,6 +1753,12 @@ export declare class FlacOutputFormat extends OutputFormat {
  */
 export declare type FlacOutputFormatOptions = {
     /**
+     * Configures the output to only append new data at the end, useful for live-streaming the file as it's being
+     * created. When enabled, the STREAMINFO block will not be finalized with accurate min/max block sizes, frame sizes,
+     * or total sample count, so don't use this option when you want to write out a clean file for later use.
+     */
+    appendOnly?: boolean;
+    /**
      * Will be called for each FLAC frame that is written.
      *
      * @param data - The raw bytes.
@@ -1433,6 +1802,27 @@ export declare const formatCuesToWebVTT: (cues: SubtitleCue[], preamble?: string
  * @public
  */
 export declare const formatSrtTimestamp: (seconds: number) => string;
+
+/**
+ * Returns the list of all audio codecs that can be decoded by the browser.
+ * @group Decoding
+ * @public
+ */
+export declare const getDecodableAudioCodecs: (checkedCodecs?: AudioCodec[], options?: SetOptional<AudioDecoderConfig, "codec" | "numberOfChannels" | "sampleRate">) => Promise<AudioCodec[]>;
+
+/**
+ * Returns the list of all media codecs that can be decoded by the browser.
+ * @group Decoding
+ * @public
+ */
+export declare const getDecodableCodecs: () => Promise<MediaCodec[]>;
+
+/**
+ * Returns the list of all video codecs that can be decoded by the browser.
+ * @group Decoding
+ * @public
+ */
+export declare const getDecodableVideoCodecs: (checkedCodecs?: VideoCodec[], options?: SetOptional<VideoDecoderConfig, "codec">) => Promise<VideoCodec[]>;
 
 /**
  * Returns the list of all audio codecs that can be encoded by the browser.
@@ -1500,6 +1890,184 @@ export declare const getFirstEncodableVideoCodec: (checkedCodecs: VideoCodec[], 
 }) => Promise<VideoCodec | null>;
 
 /**
+ * HLS input format singleton.
+ * @group Input formats
+ * @public
+ */
+export declare const HLS: HlsInputFormat;
+
+/**
+ * List of input formats required for playback of typical HLS manifests. Includes HLS itself as well as the typical
+ * segment formats: MPEG Transport Stream (.ts), MP4 (CMAF), ADTS (.aac) and MP3.
+ * @group Input formats
+ * @public
+ */
+export declare const HLS_FORMATS: InputFormat[];
+
+/**
+ * Media described using the HTTP Live Streaming (HLS) protocol, with playlists in the M3U8 format.
+ *
+ * Do not instantiate this class; use the {@link HLS} singleton instead.
+ *
+ * @group Input formats
+ * @public
+ */
+export declare class HlsInputFormat extends InputFormat {
+    get name(): string;
+    get mimeType(): string;
+}
+
+/**
+ * HTTP Live Streaming (HLS) output format. HLS media is represented by a set of .m3u8 playlist files and media segment
+ * files, meaning this format writes out multiple files, requiring the use of a _pathed Output_
+ * ({@link OutputOptions.target} must be a {@link PathedTarget}).
+ *
+ * This output format creates the following files:
+ * - A master playlist .m3u8 file, containing the list of available playlists. A master playlist is always emitted,
+ * written to the root path.
+ * - One .m3u8 file for each playlist, each containing a list of media segments.
+ * - Many media segments, containing the actual media data.
+ *
+ * To emit media playlists that use the `#EXT-X-PROGRAM-DATE-TIME` tag to map segment timestamps to real-world time,
+ * set {@link BaseTrackMetadata.isRelativeToUnixEpoch} to `true` for all tracks.
+ *
+ * @group Output formats
+ * @public
+ */
+export declare class HlsOutputFormat extends OutputFormat {
+    /** Creates a new {@link HlsOutputFormat} configured with the specified `options`. */
+    constructor(options: HlsOutputFormatOptions);
+    get fileExtension(): string;
+    get mimeType(): string;
+    getSupportedCodecs(): MediaCodec[];
+    getSupportedTrackCounts(): TrackCountLimits;
+    get supportsVideoRotationMetadata(): boolean;
+    get supportsTimestampedMediaData(): boolean;
+}
+
+/**
+ * HLS-specific output options.
+ * @group Output formats
+ * @public
+ */
+export declare type HlsOutputFormatOptions = {
+    /**
+     * Specifies the file format of each media segment. Not all formats are supported by all players; prefer sticking
+     * to the most commonly used ones: {@link MpegTsOutputFormat}, {@link CmafOutputFormat}, {@link AdtsOutputFormat},
+     * and {@link Mp3OutputFormat}.
+     *
+     * When an array of formats is specified, for each playlist, the first format that can contain all of the playlist's
+     * tracks is chosen. This allows you to, for example, package audio into .aac files and video into .ts files.
+     */
+    segmentFormat: OutputFormat | OutputFormat[];
+    /**
+     * Specifies the target (max) duration in seconds for each media segment, defaulting to 2 seconds.
+     *
+     * Mediabunny will try not to emit media segments longer than the target duration, but it is forced to if key frames
+     * are provided with a longer period than the target duration. Therefore, make sure to encode a key frame at least
+     * every `targetDuration` seconds to guarantee segment length, controllable via
+     * {@link VideoEncodingConfig.keyFrameInterval}.
+     */
+    targetDuration?: number;
+    /**
+     * Whether to bundle all media segments for a playlist into a single file. Individual segments are then extracted
+     * via range requests.
+     */
+    singleFilePerPlaylist?: boolean;
+    /**
+     * If `true`, the muxer will be in "live mode", continuously emitting updated playlists as new segments are created.
+     * The master playlist will be emitted as soon as all playlists have been emitted at least once, and will continue
+     * to be emitted each time a segment is finalized to further refine the accuracy of the `BANDWIDTH` attribute.
+     *
+     * When `false` (the default), all playlists will only be emitted once, upon output finalization.
+     */
+    live?: boolean;
+    /**
+     * When in live mode, this controls the maximum number of segments contained in each playlist. Defaults to
+     * `Infinity`, meaning playlists continually grow in size.
+     */
+    maxLiveSegmentCount?: number;
+    /**
+     * Returns the file path for a given media playlist. If the returned path is relative, it is relative to the root
+     * path.
+     *
+     * Defaults to `'playlist-{n}.m3u8'`, where `n` is the 1-based index of the media playlist in the master playlist.
+     */
+    getPlaylistPath?: (info: HlsOutputPlaylistInfo) => MaybePromise<FilePath>;
+    /**
+     * Returns the file path for a given media segment. If the returned path is relative, it is relative to the path
+     * of the containing playlist.
+     *
+     * Defaults to `'segment-{n}-{k}{ext}'`, where `n` is the 1-based index of the containing media playlist in the
+     * master playlist, `k` is the 1-based index of the segment in its playlist, and `ext` is the file extension of the
+     * segment format (including the leading dot).
+     *
+     * If {@link HlsOutputFormatOptions.singleFilePerPlaylist} is true, it defaults to `'segments-{n}{ext}'` instead.
+     */
+    getSegmentPath?: (info: HlsOutputSegmentInfo) => MaybePromise<FilePath>;
+    /**
+     * Returns the file path for a given media init segment. If the returned path is relative, it is relative to the
+     * path of the containing playlist.
+     *
+     * Only necessary for segment formats that require an init file, such as {@link CmafOutputFormat}.
+     *
+     * Defaults to `'init-{n}{ext}'`, where `n` is the 1-based index of the containing media playlist in the master
+     * playlist and `ext` is the file extension of the segment format (including the leading dot).
+     */
+    getInitPath?: (info: HlsOutputPlaylistInfo) => MaybePromise<FilePath>;
+    /** Called whenever the master playlist is written. */
+    onMaster?: (content: string) => unknown;
+    /** Called whenever a media playlist is written. */
+    onPlaylist?: (content: string, info: HlsOutputPlaylistInfo) => unknown;
+    /**
+     * Called whenever a media segment has been fully written. In single-file mode, this function will only be called
+     * once when the playlist is finalized.
+     */
+    onSegment?: (target: Target, info: HlsOutputSegmentInfo) => unknown;
+    /**
+     * Called when a media playlist is initialized, before any segments have been written. In single-file mode, this
+     * function is never called.
+     */
+    onInit?: (target: Target, info: HlsOutputPlaylistInfo) => unknown;
+    /**
+     * Called when a media segment is removed from the start of a media playlist due to
+     * {@link HlsOutputFormatOptions.maxLiveSegmentCount}. Will not be called when
+     * {@link HlsOutputFormatOptions.singleFilePerPlaylist} is `true`.
+     */
+    onSegmentPopped?: (path: string, info: HlsOutputSegmentInfo) => unknown;
+};
+
+/**
+ * Info about an HLS media playlist.
+ * @group Output formats
+ * @public
+ */
+export declare type HlsOutputPlaylistInfo = {
+    /** The 1-based index of the media playlist in the master playlist. */
+    n: number;
+    /** The output tracks contained in this playlist. */
+    tracks: OutputTrack[];
+    /** The format of the media segments in this playlist. */
+    segmentFormat: OutputFormat;
+};
+
+/**
+ * Info about an HLS media segment.
+ * @group Output formats
+ * @public
+ */
+export declare type HlsOutputSegmentInfo = {
+    /** The 1-based index of the segment in the containing media playlist. */
+    n: number;
+    /** If the segment is a single file, meaning it is a single segment file that covers the entire playlist. */
+    isSingleFile: boolean;
+    /** The format of the media segment. */
+    format: OutputFormat;
+    /** The media playlist to which this segment belongs. */
+    playlist: HlsOutputPlaylistInfo;
+};
+
+/**
  * Specifies an inclusive range of integers.
  * @group Miscellaneous
  * @public
@@ -1512,11 +2080,13 @@ export declare type InclusiveIntegerRange = {
 };
 
 /**
- * Represents an input media file. This is the root object from which all media read operations start.
+ * Represents input media, backed by a single file or multiple files depending on the format.
+ *
+ * This is the root object from which all media read operations start.
  * @group Input files & tracks
  * @public
  */
-export declare class Input<S extends Source = Source> implements Disposable {
+export declare class Input<S extends Source = Source> extends EventEmitter<InputEvents> implements Disposable {
     /** True if the input has been disposed. */
     get disposed(): boolean;
     /**
@@ -1525,8 +2095,7 @@ export declare class Input<S extends Source = Source> implements Disposable {
      */
     constructor(options: InputOptions<S>);
     /**
-     * Returns the source from which this input file reads its data. This is the same source that was passed to the
-     * constructor.
+     * Returns the source from which this input file reads data for the root path.
      */
     get source(): S;
     /**
@@ -1535,28 +2104,71 @@ export declare class Input<S extends Source = Source> implements Disposable {
      * for both MKV and WebM).
      */
     getFormat(): Promise<InputFormat>;
-    /**
-     * Computes the duration of the input file, in seconds. More precisely, returns the largest end timestamp among
-     * all tracks.
-     */
-    computeDuration(): Promise<number>;
+    /** Returns `true` if the format of the input file is known and the file can be read, `false` otherwise. */
+    canRead(): Promise<boolean>;
     /**
      * Returns the timestamp at which the input file starts. More precisely, returns the smallest starting timestamp
      * among all tracks.
+     *
+     * Optionally, you can pass in the list of tracks for which you want to compute the starting timestamp.
+     *
+     * Note that this method is potentially expensive for inputs with many tracks (such as HLS manifests), since it
+     * probes every track.
      */
-    getFirstTimestamp(): Promise<number>;
-    /** Returns the list of all tracks of this input file. */
-    getTracks(): Promise<InputTrack[]>;
-    /** Returns the list of all video tracks of this input file. */
-    getVideoTracks(): Promise<InputVideoTrack[]>;
-    /** Returns the list of all audio tracks of this input file. */
-    getAudioTracks(): Promise<InputAudioTrack[]>;
+    getFirstTimestamp(tracks?: InputTrack[]): Promise<number>;
+    /**
+     * Computes the duration of the input file, in seconds. More precisely, returns the largest end timestamp among
+     * all tracks.
+     *
+     * Optionally, you can pass in the list of tracks for which you want to compute the duration.
+     *
+     * This method can be potentially expensive depending on the underlying file format, because it returns the most
+     * accurate duration possible and must check all tracks. Use {@link Input.getDurationFromMetadata} for a faster but
+     * less accurate estimate of duration.
+     *
+     * By default, when any track in the underlying media is live, this method will only resolve once the live stream
+     * ends. If you want to query the current duration of the media, set {@link PacketRetrievalOptions.skipLiveWait}
+     * to `true` in the options.
+     */
+    computeDuration(tracks?: InputTrack[], options?: PacketRetrievalOptions): Promise<number>;
+    /**
+     * Gets the duration (end timestamp) in seconds of the input file from metadata stored in the file. This value may
+     * be approximate or diverge from the actual, precise duration returned by `.computeDuration()`, but compared to
+     * that method, this method is cheaper. When the duration cannot be determined from the file metadata, `null`
+     * is returned.
+     *
+     * Optionally, you can pass in the list of tracks for which you want to get the duration from metadata.
+     *
+     * By default, when the underlying media is live, this method will only resolve once the live stream
+     * ends. If you want to query the current duration of the media, set
+     * {@link DurationMetadataRequestOptions.skipLiveWait} to `true` in the options.
+     */
+    getDurationFromMetadata(tracks?: InputTrack[], options?: DurationMetadataRequestOptions): Promise<number | null>;
+    /**
+     * Returns the list of all tracks of this input file in the order in which they appear in the file. An optional
+     * query can be provided.
+     */
+    getTracks(query?: InputTrackQuery<InputTrack>): Promise<InputTrack[]>;
+    /** Returns the list of all video tracks of this input file. An optional query can be provided. */
+    getVideoTracks(query?: InputTrackQuery<InputVideoTrack>): Promise<InputVideoTrack[]>;
+    /** Returns the list of all audio tracks of this input file. An optional query can be provided. */
+    getAudioTracks(query?: InputTrackQuery<InputAudioTrack>): Promise<InputAudioTrack[]>;
+    /**
+     * Returns the primary video track of this input file, or null if there are no video tracks.
+     *
+     * Multiple factors determine which track is considered primary, including its position in the file, disposition,
+     * bitrate (higher bitrate is preferred), and if it can be paired with an audio track.
+     */
+    getPrimaryVideoTrack(query?: InputTrackQuery<InputVideoTrack>): Promise<InputVideoTrack | null>;
+    /**
+     * Returns the primary audio track of this input file, or null if there are no audio tracks.
+     *
+     * Multiple factors determine which track is considered primary, including its position in the file, disposition,
+     * bitrate (higher bitrate is preferred), and if it can be paired with the primary video track.
+     */
+    getPrimaryAudioTrack(query?: InputTrackQuery<InputAudioTrack>): Promise<InputAudioTrack | null>;
     /** Returns the list of all subtitle tracks of this input file. */
     getSubtitleTracks(): Promise<InputSubtitleTrack[]>;
-    /** Returns the primary video track of this input file, or null if there are no video tracks. */
-    getPrimaryVideoTrack(): Promise<InputVideoTrack | null>;
-    /** Returns the primary audio track of this input file, or null if there are no audio tracks. */
-    getPrimaryAudioTrack(): Promise<InputAudioTrack | null>;
     /**
      * Returns the list of all subtitle tracks of this input file. This is a convenience property that calls
      * {@link Input.getSubtitleTracks} and caches the result. Note that this property is a promise!
@@ -1602,10 +2214,27 @@ export declare class Input<S extends Source = Source> implements Disposable {
  */
 export declare class InputAudioTrack extends InputTrack {
     get type(): TrackType;
+    /** The codec of the track's packets. */
+    getCodec(): Promise<AudioCodec | null>;
+    /**
+     * The codec of the track's packets.
+     * @deprecated Use {@link InputAudioTrack.getCodec} instead.
+     */
     get codec(): AudioCodec | null;
-    /** The number of audio channels in the track. */
+    hasOnlyKeyPackets(): Promise<boolean>;
+    /** Returns the number of audio channels in the track. */
+    getNumberOfChannels(): Promise<number>;
+    /**
+     * The number of audio channels in the track.
+     * @deprecated Use {@link InputAudioTrack.getNumberOfChannels} instead.
+     */
     get numberOfChannels(): number;
-    /** The track's audio sample rate in hertz. */
+    /** Returns the track's audio sample rate in hertz. */
+    getSampleRate(): Promise<number>;
+    /**
+     * The track's audio sample rate in hertz.
+     * @deprecated Use {@link InputAudioTrack.getSampleRate} instead.
+     */
     get sampleRate(): number;
     /**
      * Returns the [decoder configuration](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for decoding the
@@ -1629,6 +2258,25 @@ export declare class InputDisposedError extends Error {
 }
 
 /**
+ * Describes the events that an {@link Input} emits, with each key being an event name and its value being the
+ * event data.
+ *
+ * @group Input files & tracks
+ * @public
+ */
+export declare type InputEvents = {
+    /** Emitted whenever a {@link Source} is loaded by the input. Useful to track reads. */
+    source: {
+        /** The loaded source. */
+        source: Source;
+        /** The request that led to loading this source, or `null` if the input is not pathed. */
+        request: SourceRequest | null;
+        /** Whether the source is the root file of the media. */
+        isRoot: boolean;
+    };
+};
+
+/**
  * Base class representing an input media file format.
  * @group Input formats
  * @public
@@ -1641,6 +2289,16 @@ export declare abstract class InputFormat {
 }
 
 /**
+ * Additional per-format configuration.
+ * @group Input formats
+ * @public
+ */
+export declare type InputFormatOptions = {
+    /** ISOBMFF-specific configuration. */
+    isobmff?: IsobmffInputFormatOptions;
+};
+
+/**
  * The options for creating an Input object.
  * @group Input files & tracks
  * @public
@@ -1649,7 +2307,17 @@ export declare type InputOptions<S extends Source = Source> = {
     /** A list of supported formats. If the source file is not of one of these formats, then it cannot be read. */
     formats: InputFormat[];
     /** The source from which data will be read. */
-    source: S;
+    source: S | SourceRef<S>;
+    /**
+     * An optional, second {@link Input} instance that contains the necessary metadata to initialize the tracks of
+     * this input. This is necessary in cases where track initialization info and media data are carried in separate
+     * files, like is the case with segmented MP4 (CMAF) files.
+     *
+     * The use of this field depends on the input format.
+     */
+    initInput?: Input;
+    /** Can be used to specify additional per-format configuration. */
+    formatOptions?: InputFormatOptions;
 };
 
 /**
@@ -1659,7 +2327,9 @@ export declare type InputOptions<S extends Source = Source> = {
  */
 export declare class InputSubtitleTrack extends InputTrack {
     get type(): TrackType;
+    getCodec(): Promise<SubtitleCodec | null>;
     get codec(): SubtitleCodec | null;
+    hasOnlyKeyPackets(): Promise<boolean>;
     /**
      * Returns an async iterator that yields all subtitle cues in this track.
      */
@@ -1689,7 +2359,12 @@ export declare abstract class InputTrack {
     readonly input: Input;
     /** The type of the track. */
     abstract get type(): TrackType;
-    /** The codec of the track's packets. */
+    /** Returns the codec of the track's packets. */
+    abstract getCodec(): Promise<MediaCodec | null>;
+    /**
+     * The codec of the track's packets.
+     * @deprecated Use {@link InputTrack.getCodec} instead.
+     */
     abstract get codec(): MediaCodec | null;
     /** Returns the full codec parameter string for this track. */
     abstract getCodecParameterString(): Promise<string | null>;
@@ -1700,6 +2375,11 @@ export declare abstract class InputTrack {
      * into its bitstream. Returns null if the type couldn't be determined.
      */
     abstract determinePacketType(packet: EncodedPacket): Promise<PacketType | null>;
+    /**
+     * Returns whether the track metadata says that this track only contains key packets. The actual packets may
+     * differ.
+     */
+    abstract hasOnlyKeyPackets(): Promise<boolean>;
     /** Returns true if and only if this track is a video track. */
     isVideoTrack(): this is InputVideoTrack;
     /** Returns true if and only if this track is an audio track. */
@@ -1715,40 +2395,99 @@ export declare abstract class InputTrack {
      */
     get number(): number;
     /**
-     * The identifier of the codec used internally by the container. It is not homogenized by Mediabunny
+     * Returns the identifier of the codec used internally by the container. It is not homogenized by Mediabunny
      * and depends entirely on the container format.
      *
-     * This field can be used to determine the codec of a track in case Mediabunny doesn't know that codec.
+     * This method can be used to determine the codec of a track in case Mediabunny doesn't know that codec.
      *
-     * - For ISOBMFF files, this field returns the name of the Sample Description Box (e.g. `'avc1'`).
-     * - For Matroska files, this field returns the value of the `CodecID` element.
-     * - For WAVE files, this field returns the value of the format tag in the `'fmt '` chunk.
-     * - For ADTS files, this field contains the `MPEG-4 Audio Object Type`.
-     * - For MPEG-TS files, this field contains the `streamType` value from the Program Map Table.
-     * - In all other cases, this field is `null`.
+     * - For ISOBMFF files, this resolves to the name of the Sample Description Box (e.g. `'avc1'`).
+     * - For Matroska files, this resolves to the value of the `CodecID` element.
+     * - For WAVE files, this resolves to the value of the format tag in the `'fmt '` chunk.
+     * - For ADTS files, this resolves to the `MPEG-4 Audio Object Type`.
+     * - For MPEG-TS files, this resolves to the `streamType` value from the Program Map Table.
+     * - In all other cases, this resolves to `null`.
+     */
+    getInternalCodecId(): Promise<string | number | Uint8Array<ArrayBufferLike> | null>;
+    /**
+     * See {@link InputTrack.getInternalCodecId}.
+     * @deprecated Use {@link InputTrack.getInternalCodecId} instead.
      */
     get internalCodecId(): string | number | Uint8Array<ArrayBufferLike> | null;
     /**
+     * Returns the ISO 639-2/T language code for this track. If the language is unknown, this resolves to `'und'`
+     * (undetermined).
+     */
+    getLanguageCode(): Promise<string>;
+    /**
      * The ISO 639-2/T language code for this track. If the language is unknown, this field is `'und'` (undetermined).
+     * @deprecated Use {@link InputTrack.getLanguageCode} instead.
      */
     get languageCode(): string;
-    /** A user-defined name for this track. */
+    /** Returns the user-defined name for this track. */
+    getName(): Promise<string | null>;
+    /**
+     * A user-defined name for this track.
+     * @deprecated Use {@link InputTrack.getName} instead.
+     */
     get name(): string | null;
+    /**
+     * Returns a positive number x such that all timestamps and durations of all packets of this track are
+     * integer multiples of 1/x.
+     */
+    getTimeResolution(): Promise<number>;
     /**
      * A positive number x such that all timestamps and durations of all packets of this track are
      * integer multiples of 1/x.
+     * @deprecated Use {@link InputTrack.getTimeResolution} instead.
      */
     get timeResolution(): number;
-    /** The track's disposition, i.e. information about its intended usage. */
+    /**
+     * Returns whether the timestamps of this track are relative to the Unix epoch (January 1, 1970 00:00:00 UTC).
+     * When `true`, each timestamp maps to a definitive point in time.
+     */
+    isRelativeToUnixEpoch(): Promise<boolean>;
+    /** Returns the track's disposition, i.e. information about its intended usage. */
+    getDisposition(): Promise<TrackDisposition>;
+    /**
+     * The track's disposition, i.e. information about its intended usage.
+     * @deprecated Use {@link InputTrack.getDisposition} instead.
+     */
     get disposition(): TrackDisposition;
+    /**
+     * Returns the peak bitrate of the track in bits per second, as specified in the track's metadata. This might not
+     * match the actual media data's bitrate.
+     */
+    getBitrate(): Promise<number | null>;
+    /**
+     * Returns the average bitrate of the track in bits per second, as specified in the track's metadata. This might
+     * not match the actual media data's bitrate.
+     */
+    getAverageBitrate(): Promise<number | null>;
     /**
      * Returns the start timestamp of the first packet of this track, in seconds. While often near zero, this value
      * may be positive or even negative. A negative starting timestamp means the track's timing has been offset. Samples
      * with a negative timestamp should not be presented.
      */
     getFirstTimestamp(): Promise<number>;
-    /** Returns the end timestamp of the last packet of this track, in seconds. */
-    computeDuration(): Promise<number>;
+    /**
+     * Returns the end timestamp of the last packet of this track, in seconds.
+     *
+     * By default, when the underlying media is live, this method will only resolve once the live stream ends. If you
+     * want to query the current end timestamp of the stream, set {@link PacketRetrievalOptions.skipLiveWait} to `true`
+     * in the options.
+     */
+    computeDuration(options?: PacketRetrievalOptions): Promise<number>;
+    /**
+     * Gets the duration (end timestamp) in seconds of this track from metadata stored in the file. This value may be
+     * approximate or diverge from the actual, precise duration returned by `.computeDuration()`, but compared to that
+     * method, this method is cheaper. When the duration cannot be determined from the file metadata, `null`
+     * is returned.
+     *
+     * By default, when the underlying media is live, this method will only resolve once the live stream
+     * ends. If you want to query the current duration of the media, set
+     * {@link DurationMetadataRequestOptions.skipLiveWait} to `true` in the options.
+     */
+    getDurationFromMetadata(options?: DurationMetadataRequestOptions): Promise<number | null>;
     /**
      * Computes aggregate packet statistics for this track, such as average packet rate or bitrate.
      *
@@ -1756,9 +2495,83 @@ export declare abstract class InputTrack {
      * looked at before it can return early; this means, you can use it to aggregate only a subset (prefix) of all
      * packets. This is very useful for getting a great estimate of video frame rate without having to scan through the
      * entire file.
+     *
+     * By default, when the underlying media is live and `targetPacketCount` is not set, this method will only resolve
+     * once the live stream ends. If you want to query the current packet statistics of the stream, set
+     * {@link PacketRetrievalOptions.skipLiveWait} to `true` in the options.
      */
-    computePacketStats(targetPacketCount?: number): Promise<PacketStats>;
+    computePacketStats(targetPacketCount?: number, options?: PacketRetrievalOptions): Promise<PacketStats>;
+    /**
+     * Whether or not this track is currently live, meaning the media's end is still unknown.
+     *
+     * The value returned by this method may change over time as the track stops being live. To keep track of the
+     * track's live status, poll this method at the track's refresh interval
+     * via {@link InputTrack.getLiveRefreshInterval}.
+     */
+    isLive(): Promise<boolean>;
+    /**
+     * Returns the track's live refresh interval in seconds, or `null` if the track is not live. This interval describes
+     * the time it takes, on average, for new live media data to become available.
+     */
+    getLiveRefreshInterval(): Promise<number | null>;
+    /**
+     * Returns `true` if this track can be paired with the given track. Two tracks being pairable means they can be
+     * presented (displayed) together.
+     *
+     * Returns `false` if `other` equals `this`.
+     */
+    canBePairedWith(other: InputTrack): boolean;
+    /**
+     * Gets the list of other tracks that can be paired with this track. An optional query can be provided to narrow
+     * down the results.
+     */
+    getPairableTracks(query?: InputTrackQuery<InputTrack>): Promise<InputTrack[]>;
+    /**
+     * Gets the list of other video tracks that can be paired with this track. An optional query can be provided to
+     * narrow down the results.
+     */
+    getPairableVideoTracks(query?: InputTrackQuery<InputVideoTrack>): Promise<InputVideoTrack[]>;
+    /**
+     * Gets the list of other audio tracks that can be paired with this track. An optional query can be provided to
+     * narrow down the results.
+     */
+    getPairableAudioTracks(query?: InputTrackQuery<InputAudioTrack>): Promise<InputAudioTrack[]>;
+    /** Returns the primary track that can be paired with this track, optionally steered by the provided query. */
+    getPrimaryPairableVideoTrack(query?: InputTrackQuery<InputVideoTrack>): Promise<InputVideoTrack | null>;
+    /** Returns the primary track that can be paired with this track, optionally steered by the provided query. */
+    getPrimaryPairableAudioTrack(query?: InputTrackQuery<InputAudioTrack>): Promise<InputAudioTrack | null>;
+    /** Returns `true` if there is another track that can be paired with this track. */
+    hasPairableTrack(predicate?: (track: InputTrack) => MaybePromise<boolean>): Promise<boolean>;
+    /** Returns `true` if there is a video track that can be paired with this track. */
+    hasPairableVideoTrack(predicate?: (track: InputVideoTrack) => MaybePromise<boolean>): Promise<boolean>;
+    /** Returns `true` if there is an audio track that can be paired with this track. */
+    hasPairableAudioTrack(predicate?: (track: InputAudioTrack) => MaybePromise<boolean>): Promise<boolean>;
 }
+
+/**
+ * Defines a query for input tracks. Can be used to query tracks tersely and expressively, which is especially useful
+ * for media inputs with many tracks, such as HLS manifests.
+ *
+ * @group Input files & tracks
+ * @public
+ */
+export declare type InputTrackQuery<T extends InputTrack> = {
+    /**
+     * A filter predicate function called for every track. Returning or resolving to `false` excludes the track from
+     * the result.
+     */
+    filter?: (track: T) => MaybePromise<boolean>;
+    /**
+     * A function called for every track, used to define a track ordering. Tracks are ordered in ascending order using
+     * the value returned by this function. When the function returns an array of numbers `arr`, tracks will be sorted
+     * by `arr[0]` unless they have the same value, in which case they will be sorted by `arr[1]`, and so on. This
+     * allows you to construct a list of ordering criteria, sorted by importance.
+     *
+     * To help construct complex ordering criteria, the {@link asc}, {@link desc}, and {@link prefer} helper functions
+     * can be used.
+     */
+    sortBy?: (track: T) => MaybePromise<number | number[]>;
+};
 
 /**
  * Represents a video track in an input file.
@@ -1766,26 +2579,78 @@ export declare abstract class InputTrack {
  * @public
  */
 export declare class InputVideoTrack extends InputTrack {
+    get type(): TrackType;
+    /** The codec of the track's packets. */
+    getCodec(): Promise<VideoCodec | null>;
+    /**
+     * The codec of the track's packets.
+     * @deprecated Use {@link InputVideoTrack.getCodec} instead.
+     */
+    get codec(): VideoCodec | null;
+    hasOnlyKeyPackets(): Promise<boolean>;
+    /** Returns the width in pixels of the track's coded samples, before any transformations or rotations. */
+    getCodedWidth(): Promise<number>;
+    /**
+     * The width in pixels of the track's coded samples, before any transformations or rotations.
+     * @deprecated Use {@link InputVideoTrack.getCodedWidth} instead.
+     */
+    get codedWidth(): number;
+    /** Returns the height in pixels of the track's coded samples, before any transformations or rotations. */
+    getCodedHeight(): Promise<number>;
+    /**
+     * The height in pixels of the track's coded samples, before any transformations or rotations.
+     * @deprecated Use {@link InputVideoTrack.getCodedHeight} instead.
+     */
+    get codedHeight(): number;
+    /** Returns the angle in degrees by which the track's frames should be rotated (clockwise). */
+    getRotation(): Promise<Rotation>;
+    /**
+     * The angle in degrees by which the track's frames should be rotated (clockwise).
+     * @deprecated Use {@link InputVideoTrack.getRotation} instead.
+     */
+    get rotation(): Rotation;
+    /**
+     * Returns the width of the track's frames in square pixels, adjusted for pixel aspect ratio but before rotation.
+     */
+    getSquarePixelWidth(): Promise<number>;
+    /**
+     * The width of the track's frames in square pixels, adjusted for pixel aspect ratio but before rotation.
+     * @deprecated Use {@link InputVideoTrack.getSquarePixelWidth} instead.
+     */
+    get squarePixelWidth(): number;
+    /**
+     * Returns the height of the track's frames in square pixels, adjusted for pixel aspect ratio but before rotation.
+     */
+    getSquarePixelHeight(): Promise<number>;
+    /**
+     * The height of the track's frames in square pixels, adjusted for pixel aspect ratio but before rotation.
+     * @deprecated Use {@link InputVideoTrack.getSquarePixelHeight} instead.
+     */
+    get squarePixelHeight(): number;
+    /**
+     * Returns the pixel aspect ratio of the track's frames as a rational number in its reduced form. Most videos use
+     * square pixels (1:1).
+     */
+    getPixelAspectRatio(): Promise<Rational>;
     /**
      * The pixel aspect ratio of the track's frames, as a rational number in its reduced form. Most videos use
      * square pixels (1:1).
+     * @deprecated Use {@link InputVideoTrack.getPixelAspectRatio} instead.
      */
-    readonly pixelAspectRatio: Rational;
-    get type(): TrackType;
-    get codec(): VideoCodec | null;
-    /** The width in pixels of the track's coded samples, before any transformations or rotations. */
-    get codedWidth(): number;
-    /** The height in pixels of the track's coded samples, before any transformations or rotations. */
-    get codedHeight(): number;
-    /** The angle in degrees by which the track's frames should be rotated (clockwise). */
-    get rotation(): Rotation;
-    /** The width of the track's frames in square pixels, adjusted for pixel aspect ratio but before rotation. */
-    get squarePixelWidth(): number;
-    /** The height of the track's frames in square pixels, adjusted for pixel aspect ratio but before rotation. */
-    get squarePixelHeight(): number;
-    /** The display width of the track's frames in pixels, after aspect ratio adjustment and rotation. */
+    get pixelAspectRatio(): Rational;
+    /** Returns the display width of the track's frames in pixels, after aspect ratio adjustment and rotation. */
+    getDisplayWidth(): Promise<number>;
+    /**
+     * The display width of the track's frames in pixels, after aspect ratio adjustment and rotation.
+     * @deprecated Use {@link InputVideoTrack.getDisplayWidth} instead.
+     */
     get displayWidth(): number;
-    /** The display height of the track's frames in pixels, after aspect ratio adjustment and rotation. */
+    /** Returns the display height of the track's frames in pixels, after aspect ratio adjustment and rotation. */
+    getDisplayHeight(): Promise<number>;
+    /**
+     * The display height of the track's frames in pixels, after aspect ratio adjustment and rotation.
+     * @deprecated Use {@link InputVideoTrack.getDisplayHeight} instead.
+     */
     get displayHeight(): number;
     /** Returns the color space of the track's samples. */
     getColorSpace(): Promise<VideoColorSpaceInit>;
@@ -1806,11 +2671,38 @@ export declare class InputVideoTrack extends InputTrack {
 
 /**
  * Format representing files compatible with the ISO base media file format (ISOBMFF), like MP4 or MOV files.
+ *
+ * This format can make use of {@link InputOptions.initInput}. When the file contents are fragmented but no track
+ * initialization info is provided (no `moov` atom), then it must be provided via `initInput`.
+ *
  * @group Input formats
  * @public
  */
 export declare abstract class IsobmffInputFormat extends InputFormat {
 }
+
+/**
+ * Additional ISOBMFF input configuration.
+ * @group Input formats
+ * @public
+ */
+export declare type IsobmffInputFormatOptions = {
+    /**
+     * A callback that gets invoked for each key ID required for sample content decryption. The key ID is provided as a
+     * 32-character lowercase hexadecimal string.
+     *
+     * Must return or resolve to a 32-character hexadecimal string or a 16-byte `Uint8Array`.
+     */
+    resolveKeyId?: (options: {
+        /** The key ID that is to be resolved to a key. This is a 32-character lowercase hexadecimal string. */
+        keyId: string;
+        /**
+         * Protection System Specific Header (pssh) boxes that apply to this key ID. Can be used to obtain a
+         * description key from a DRM license server.
+         */
+        psshBoxes: PsshBox[];
+    }) => MaybePromise<Uint8Array | string>;
+};
 
 /**
  * Format representing files compatible with the ISO base media file format (ISOBMFF), like MP4 or MOV files.
@@ -1975,7 +2867,7 @@ export declare class MediaStreamAudioTrackSource extends AudioSource {
      * Creates a new {@link MediaStreamAudioTrackSource} from a `MediaStreamAudioTrack`, which will pull audio samples
      * from the stream in real time and encode them according to {@link AudioEncodingConfig}.
      */
-    constructor(track: MediaStreamAudioTrack, encodingConfig: AudioEncodingConfig);
+    constructor(track: MediaStreamAudioTrack, encodingConfig: AudioEncodingConfig, options?: MediaStreamAudioTrackSourceOptions);
     /**
      * Pauses the capture of audio data - any audio data emitted by the underlying media stream will be ignored
      * while paused. This does *not* close the underlying `MediaStreamAudioTrack`, it just ignores its output.
@@ -1984,6 +2876,29 @@ export declare class MediaStreamAudioTrackSource extends AudioSource {
     /** Resumes the capture of audio data after being paused. */
     resume(): void;
 }
+
+/**
+ * Options for {@link MediaStreamAudioTrackSource}.
+ * @group Media sources
+ * @public
+ */
+export declare type MediaStreamAudioTrackSourceOptions = {
+    /**
+     * Controls the basis (zero point) for audio sample timestamps.
+     *
+     * When set to `'synced-zero'`, timestamps will be relative to the first chunk of media from a `MediaStreamTrack`
+     * added to the {@link Output}.
+     *
+     * When set to `'zero'`, timestamps will be relative to the first audio sample emitted by this source.
+     *
+     * When set to `'unix'`, timestamps will be relative to the Unix epoch, so clearly associated with a distinct point
+     * in time. Here, pausing via {@link MediaStreamAudioTrackSource.pause} will also create gaps in timestamps. Be sure
+     * to pair this mode with {@link BaseTrackMetadata.isRelativeToUnixEpoch}.
+     *
+     * Defaults to `'synced-zero'`.
+     */
+    timestampBase?: 'synced-zero' | 'zero' | 'unix';
+};
 
 /**
  * Video source that encodes the frames of a
@@ -2015,7 +2930,7 @@ export declare class MediaStreamVideoTrackSource extends VideoSource {
 }
 
 /**
- * Options for MediaStreamVideoTrackSource.
+ * Options for {@link MediaStreamVideoTrackSource}.
  * @group Media sources
  * @public
  */
@@ -2027,6 +2942,21 @@ export declare type MediaStreamVideoTrackSourceOptions = {
      * lead to wildly irregular FPS.
      */
     frameRate?: number | null;
+    /**
+     * Controls the basis (zero point) for video frame timestamps.
+     *
+     * When set to `'synced-zero'`, timestamps will be relative to the first chunk of media from a `MediaStreamTrack`
+     * added to the {@link Output}.
+     *
+     * When set to `'zero'`, timestamps will be relative to the first video frame emitted by this source.
+     *
+     * When set to `'unix'`, timestamps will be relative to the Unix epoch, so clearly associated with a distinct point
+     * in time. Here, pausing via {@link MediaStreamVideoTrackSource.pause} will also create gaps in timestamps. Be sure
+     * to pair this mode with {@link BaseTrackMetadata.isRelativeToUnixEpoch}.
+     *
+     * Defaults to `'synced-zero'`.
+     */
+    timestampBase?: 'synced-zero' | 'zero' | 'unix';
 };
 
 /**
@@ -2092,8 +3022,9 @@ export declare type MetadataTags = {
      * - WebM/Matroska: `SimpleTag` elements whose target is 50 (MOVIE), either containing string or `Uint8Array`
      * values. Additionally, all attached files (such as font files) are included here, where the key corresponds to
      * the FileUID and the value is an {@link AttachedFile}.
-     * - MP3: The ID3v2 tags, or a single `'TAG'` key with the contents of the ID3v1 tag.
-     * - ADTS: The ID3v2 tags.
+     * - MP3: The ID3v2 tags, or a single `'TAG'` key with the contents of the ID3v1 tag. The ID3v2 `'TXXX'`
+     * user-defined text frames are exposed as a `Record<string, string>`.
+     * - ADTS: The ID3v2 tags, just like in MP3.
      * - Ogg: The key-value string pairs from the Vorbis-style comment header (see RFC 7845, Section 5.2).
      * Additionally, the `'vendor'` key refers to the vendor string within this header.
      * - WAVE: The individual metadata chunks within the RIFF INFO chunk. Values are always ISO 8859-1 strings.
@@ -2101,7 +3032,7 @@ export declare type MetadataTags = {
      * Additionally, the `'vendor'` key refers to the vendor string within this header.
      * - MPEG-TS: Not supported.
      */
-    raw?: Record<string, string | Uint8Array | RichImageData | AttachedFile | null>;
+    raw?: Record<string, string | Uint8Array | RichImageData | AttachedFile | Record<string, string> | null>;
 };
 
 /**
@@ -2278,6 +3209,10 @@ export declare const MPEG_TS: MpegTsInputFormat;
 /**
  * MPEG Transport Stream (MPEG-TS) file format.
  *
+ * This format can make use of {@link InputOptions.initInput} to initialize track information even when no
+ * initialization information is provided for the track, for example because it has no key frames. In this case, tracks
+ * are matched to each other based on their PID.
+ *
  * Do not instantiate this class; use the {@link MPEG_TS} singleton instead.
  *
  * @group Input formats
@@ -2393,28 +3328,36 @@ export declare type OggOutputFormatOptions = {
 };
 
 /**
- * Main class orchestrating the creation of a new media file.
+ * Main class orchestrating the creation of new media files.
  * @group Output files
  * @public
  */
-export declare class Output<F extends OutputFormat = OutputFormat, T extends Target = Target> {
+export declare class Output<F extends OutputFormat = OutputFormat, T extends Target = Target> extends EventEmitter<OutputEvents> {
     /** The format of the output file. */
-    format: F;
-    /** The target to which the file will be written. */
-    target: T;
+    readonly format: F;
     /** The current state of the output. */
     state: 'pending' | 'started' | 'canceled' | 'finalizing' | 'finalized';
+    /**
+     * The {@link OutputTrackGroup} that all tracks are assigned to by default unless otherwise specified by
+     * {@link BaseTrackMetadata.group}.
+     */
+    readonly defaultTrackGroup: OutputTrackGroup;
+    /**
+     * The target to which the root file will be written. Throws when using {@link PathedTarget} with an async callback;
+     * prefer the `'target'` event for those cases.
+     */
+    get target(): T;
     /**
      * Creates a new instance of {@link Output} which can then be used to create a new media file according to the
      * specified {@link OutputOptions}.
      */
     constructor(options: OutputOptions<F, T>);
     /** Adds a video track to the output with the given source. Can only be called before the output is started. */
-    addVideoTrack(source: VideoSource, metadata?: VideoTrackMetadata): void;
+    addVideoTrack(source: VideoSource, metadata?: VideoTrackMetadata): OutputVideoTrack;
     /** Adds an audio track to the output with the given source. Can only be called before the output is started. */
-    addAudioTrack(source: AudioSource, metadata?: AudioTrackMetadata): void;
+    addAudioTrack(source: AudioSource, metadata?: AudioTrackMetadata): OutputAudioTrack;
     /** Adds a subtitle track to the output with the given source. Can only be called before the output is started. */
-    addSubtitleTrack(source: SubtitleSource, metadata?: SubtitleTrackMetadata): void;
+    addSubtitleTrack(source: SubtitleSource, metadata?: SubtitleTrackMetadata): OutputSubtitleTrack;
     /**
      * Sets descriptive metadata tags about the media file, such as title, author, date, or cover art. When called
      * multiple times, only the metadata from the last call will be used.
@@ -2448,6 +3391,36 @@ export declare class Output<F extends OutputFormat = OutputFormat, T extends Tar
      */
     finalize(): Promise<void>;
 }
+
+/**
+ * An {@link OutputTrack} providing audio data, created using {@link Output.addAudioTrack}.
+ * @group Output files
+ * @public
+ */
+export declare class OutputAudioTrack extends OutputTrack {
+    readonly type: 'audio';
+    readonly source: AudioSource;
+    readonly metadata: AudioTrackMetadata;
+}
+
+/**
+ * Describes the events that an {@link Output} emits, with each key being an event name and its value being the
+ * event data.
+ *
+ * @group Output files
+ * @public
+ */
+export declare type OutputEvents = {
+    /** Emitted whenever a {@link Target} is obtained by the output. Useful to track writes. */
+    target: {
+        /** The target that was obtained. */
+        target: Target;
+        /** The request that led to the target being obtained, or `null` if the output is not pathed. */
+        request: TargetRequest | null;
+        /** Whether the target is the root file of the media. */
+        isRoot: boolean;
+    };
+};
 
 /**
  * Base class representing an output media file format.
@@ -2489,8 +3462,92 @@ export declare type OutputOptions<F extends OutputFormat = OutputFormat, T exten
     /** The format of the output file. */
     format: F;
     /** The target to which the file will be written. */
-    target: T;
+    target: T | PathedTarget<T>;
+    /**
+     * Optional; the target to which the track initialization data will be written. Most formats do not make use of
+     * this, but some do, such as {@link CmafOutputFormat}.
+     *
+     * When this is a function, it will only be called if an init target is needed.
+     */
+    initTarget?: T | (() => MaybePromise<T>);
+    /**
+     * Optional; a callback to be called at the end of {@link Output.finalize}. Can be used to run logic once the
+     * output has completed. If a promise is returned, it will be awaited internally by {@link Output.finalize}.
+     */
+    onFinalize?: () => MaybePromise<unknown>;
 };
+
+/**
+ * An {@link OutputTrack} providing subtitle data, created using {@link Output.addSubtitleTrack}.
+ * @group Output files
+ * @public
+ */
+export declare class OutputSubtitleTrack extends OutputTrack {
+    readonly type: 'subtitle';
+    readonly source: SubtitleSource;
+    readonly metadata: SubtitleTrackMetadata;
+}
+
+/**
+ * Represents a track added to an {@link Output}.
+ * @group Output files
+ * @public
+ */
+export declare abstract class OutputTrack {
+    /** The {@link Output} this track belongs to. */
+    readonly output: Output;
+    /** The type of this track. */
+    readonly type: TrackType;
+    /** The media source providing data for this track. */
+    readonly source: MediaSource_2;
+    /** The metadata associated with this track. */
+    readonly metadata: BaseTrackMetadata;
+    /** Returns true if and only if this track is a video track. */
+    isVideoTrack(): this is OutputVideoTrack;
+    /** Returns true if and only if this track is an audio track. */
+    isAudioTrack(): this is OutputAudioTrack;
+    /** Returns true if and only if this track is a subtitle track. */
+    isSubtitleTrack(): this is OutputSubtitleTrack;
+    /**
+     * Returns true if and only if this track can be paired with the given other track. Pairability can be set using
+     * the {@link BaseTrackMetadata.group} option.
+     */
+    canBePairedWith(other: OutputTrack): boolean;
+}
+
+/**
+ * Used to define pairability between {@link OutputTrack} instances. First create the group, then assign tracks to it
+ * via {@link BaseTrackMetadata.group}.
+ *
+ * Two tracks are considered _pairable_ if they are in the same group but have a different {@link TrackType}, or if they
+ * are in different groups that are paired with each other. Groups can be paired with each other using the
+ * {@link OutputTrackGroup.pairWith} method.
+ *
+ * @group Output files
+ * @public
+ */
+export declare class OutputTrackGroup {
+    /** Creates a new {@link OutputTrackGroup}. */
+    constructor();
+    /**
+     * Marks this group as being pairable with another group, symmetrically. Output tracks where each track is assigned
+     * to one half of a group pairing are then considered pairable.
+     *
+     * You cannot pair a group with itself.
+     */
+    pairWith(other: OutputTrackGroup): void;
+}
+
+/**
+ * An {@link OutputTrack} providing video data, created using {@link Output.addVideoTrack}.
+ * @group Output files
+ * @public
+ */
+export declare class OutputVideoTrack extends OutputTrack {
+    readonly type: 'video';
+    readonly source: VideoSource;
+    readonly metadata: VideoTrackMetadata;
+}
 
 /**
  * Additional options for controlling packet retrieval.
@@ -2504,12 +3561,24 @@ export declare type PacketRetrievalOptions = {
      */
     metadataOnly?: boolean;
     /**
-     * When set to true, key packets will be verified upon retrieval by looking into the packet's bitstream.
+     * When set to `true`, key packets will be verified upon retrieval by looking into the packet's bitstream.
      * If not enabled, the packet types will be determined solely by what's stored in the containing file and may be
      * incorrect, potentially leading to decoder errors. Since determining a packet's actual type requires looking into
      * its data, this option cannot be enabled together with `metadataOnly`.
      */
     verifyKeyPackets?: boolean;
+    /**
+     * When querying packets in live media that are in the future relative to the current live edge, Mediabunny will,
+     * by default, wait for the stream to advance until the query can be satisfied. In a sense, Mediabunny simply treats
+     * live streams as media files that are still being written, and any read that depends on future information will
+     * wait until it can be fulfilled.
+     *
+     * If you want to query packets based only on the currently known information, set this field to `true` - this way,
+     * Mediabunny will never wait for the live stream to catch up.
+     *
+     * For non-live media, this field has no effect.
+     */
+    skipLiveWait?: boolean;
 };
 
 /**
@@ -2549,11 +3618,75 @@ export declare const parseAssTimestamp: (timeString: string) => number;
 export declare const parseSrtTimestamp: (timeString: string) => number;
 
 /**
+ * A source which can create new sources from file paths. Required for multi-file inputs such as HLS playlists.
+ * @public
+ * @group Input sources
+ */
+export declare abstract class PathedSource extends Source {
+    /** The path that points to the root file; the entry file of the media. */
+    rootPath: FilePath;
+    /** The callback that is called for each requested file; must return a {@link Source} or {@link SourceRef}. */
+    requestHandler: (request: SourceRequest) => MaybePromise<Source | SourceRef>;
+    constructor(
+    /** The path that points to the root file; the entry file of the media. */
+    rootPath: FilePath, 
+    /** The callback that is called for each requested file; must return a {@link Source} or {@link SourceRef}. */
+    requestHandler: (request: SourceRequest) => MaybePromise<Source | SourceRef>);
+}
+
+/**
+ * A special target for writing multi-file media where each file is uniquely identified by a path.
+ * @group Output targets
+ * @public
+ */
+export declare class PathedTarget<T extends Target> {
+    /** The path that points to the root file; the entry file of the media. */
+    readonly rootPath: FilePath;
+    /** The callback that is called for each file that needs to be written; must return a {@link Target}. */
+    readonly getTarget: (request: TargetRequest) => MaybePromise<T>;
+    /** Creates a new {@link PathedTarget} from a root path and a callback. */
+    constructor(
+    /** The path that points to the root file; the entry file of the media. */
+    rootPath: FilePath, 
+    /** The callback that is called for each file that needs to be written; must return a {@link Target}. */
+    getTarget: (request: TargetRequest) => MaybePromise<T>);
+}
+
+/**
  * List of known PCM (uncompressed) audio codecs, ordered by encoding preference.
  * @group Codecs
  * @public
  */
 export declare const PCM_AUDIO_CODECS: readonly ["pcm-s16", "pcm-s16be", "pcm-s24", "pcm-s24be", "pcm-s32", "pcm-s32be", "pcm-f32", "pcm-f32be", "pcm-f64", "pcm-f64be", "pcm-u8", "pcm-s8", "ulaw", "alaw"];
+
+/**
+ * Helper function for use in {@link InputTrackQuery.sortBy}, used to sort tracks by boolean properties. `true` is
+ * sorted to the start, `false` to the end. Useful for expressing soft preferences (e.g., "I'd prefer 1080p, but other
+ * resolutions are fine too") as opposed to {@link InputTrackQuery.filter} which expresses hard requirements for
+ * tracks.
+ *
+ * @group Input files & tracks
+ * @public
+ */
+export declare const prefer: (value: boolean) => number;
+
+/**
+ * Represents a Protection System Specific Header box as used by ISOBMFF Common Encryption. Contains
+ * DRM system-specific data that can be used to obtain a decryption key.
+ *
+ * @group Miscellaneous
+ * @public
+ */
+export declare type PsshBox = {
+    /** The system ID as a 32-bit lowercase hex string. */
+    systemId: string;
+    /**
+     * The list of key IDs (32-bit lowercase hex strings) this box applies to, or `null` if it applies to all key IDs.
+     */
+    keyIds: string[] | null;
+    /** The content protection system-specific data. */
+    data: Uint8Array;
+};
 
 /**
  * QuickTime File Format input format singleton.
@@ -2619,6 +3752,26 @@ export declare class QuickTimeInputFormat extends IsobmffInputFormat {
 }
 
 /**
+ * A source that covers a range (offset + length) of another source. Useful for reading files that are embedded within
+ * larger files.
+ *
+ * @group Input sources
+ * @public
+ */
+export declare class RangedSource extends Source {
+    ref(): SourceRef<this>;
+}
+
+/**
+ * A target that writes to a subrange (defined by an offset) of another, underlying target. Useful for writing a file
+ * into a section of a larger file.
+ * @group Output targets
+ * @public
+ */
+export declare class RangedTarget extends Target {
+}
+
+/**
  * A rational number; a ratio of two integers.
  * @group Miscellaneous
  * @public
@@ -2655,7 +3808,7 @@ export declare class ReadableStreamSource extends Source {
  * @public
  */
 export declare type ReadableStreamSourceOptions = {
-    /** The maximum number of bytes the cache is allowed to hold in memory. Defaults to 16 MiB. */
+    /** The maximum number of bytes the cache is allowed to hold in memory. Defaults to 32 MiB. */
     maxCacheSize?: number;
 };
 
@@ -2665,7 +3818,7 @@ export declare type ReadableStreamSourceOptions = {
  * @public
  */
 export declare type Rectangle = {
-    /** The distance in pixels to the left edge of the rectangle . */
+    /** The distance in pixels to the left edge of the rectangle. */
     left: number;
     /** The distance in pixels to the top edge of the rectangle. */
     top: number;
@@ -2690,6 +3843,14 @@ export declare const registerDecoder: (decoder: typeof CustomVideoDecoder | type
  * @public
  */
 export declare const registerEncoder: (encoder: typeof CustomVideoEncoder | typeof CustomAudioEncoder) => void;
+
+/**
+ * Registers a callback to handle the transformation of {@link VideoSample} instances. The callback can either return
+ * the transformed sample, or `null` to indicate that it doesn't want to handle the given transformation task.
+ * @group Samples
+ * @public
+ */
+export declare const registerVideoSampleTransformer: (transformer: (sample: VideoSample, description: VideoSampleTransformationDescription) => MaybePromise<VideoSample | null>) => void;
 
 /**
  * Image data with additional metadata.
@@ -2718,6 +3879,13 @@ export declare class RichImageData {
 export declare type Rotation = 0 | 90 | 180 | 270;
 
 /**
+ * Sets all keys K of T to be optional.
+ * @group Miscellaneous
+ * @public
+ */
+export declare type SetOptional<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
+
+/**
  * Sets all keys K of T to be required.
  * @group Miscellaneous
  * @public
@@ -2729,7 +3897,8 @@ export declare type SetRequired<T, K extends keyof T> = T & Required<Pick<T, K>>
  * @group Input sources
  * @public
  */
-export declare abstract class Source {
+export declare abstract class Source extends EventEmitter<SourceEvents> {
+    constructor();
     /**
      * Resolves with the total size of the file in bytes. This function is memoized, meaning only the first call
      * will retrieve the size.
@@ -2744,9 +3913,76 @@ export declare abstract class Source {
      * Throws an error if the source is unsized.
      */
     getSize(): Promise<number>;
-    /** Called each time data is retrieved from the source. Will be called with the retrieved range (end exclusive). */
+    /**
+     * Returns a new {@link RangedSource} that maps data onto this source using the given offset and length. If a length
+     * is not provided, the ranged source spans until the end of this source's data.
+     *
+     * Useful for reading files that are embedded within larger files.
+     */
+    slice(offset: number, length?: number): RangedSource;
+    /**
+     * Called each time data is retrieved from the source. Will be called with the retrieved range (end exclusive).
+     *
+     * @deprecated Use `source.on('read', ({ start, end }) => ...)` instead.
+     */
     onread: ((start: number, end: number) => unknown) | null;
+    /**
+     * Creates a new `SourceRef` pointing to this source. You are expected to call `.free()` on said `SourceRef` when
+     * you're done with it.
+     */
+    ref(): SourceRef<this>;
 }
+
+/**
+ * The events emitted by a {@link Source}, with each key being an event name and its value being the event data.
+ * @group Input sources
+ * @public
+ */
+export declare type SourceEvents = {
+    /** Emitted each time data is retrieved from the source. */
+    read: {
+        /** The start of the retrieved range, inclusive. */
+        start: number;
+        /** The end of the retrieved range, exclusive. */
+        end: number;
+    };
+};
+
+/**
+ * A reference to a {@link Source}, used to manage a source's lifecycle. Creating a `SourceRef` via {@link Source.ref}
+ * increases that source's internal reference count. As long as a source has a non-zero reference count, it is assumed
+ * to still be in use. Once all references are freed via {@link SourceRef.free}, the source gets disposed.
+ *
+ * @group Input sources
+ * @public
+ */
+export declare class SourceRef<S extends Source = Source> implements Disposable {
+    /** The {@link Source} this ref references. Accessing this field throws an error after having freed the ref. */
+    get source(): S;
+    /** Whether or not this reference has been freed via {@link SourceRef.free}. */
+    get freed(): boolean;
+    /**
+     * Frees the ref, decrementing the source's internal reference count. If the source's internal reference count
+     * reaches zero, it gets disposed. To catch bugs, this method throws if the ref is already freed.
+     */
+    free(): void;
+    /**
+     * Calls {@link SourceRef.free}.
+     */
+    [Symbol.dispose](): void;
+}
+
+/**
+ * A request for a {@link Source} at the given path.
+ * @group Input sources
+ * @public
+ */
+export declare type SourceRequest = {
+    /** The requested file path. */
+    path: FilePath;
+    /** Whether the requested file is the root file. */
+    isRoot: boolean;
+};
 
 /**
  * Splits ASS/SSA subtitle text into header (styles) and individual cues.
@@ -2768,50 +4004,23 @@ export declare const splitAssIntoCues: (text: string) => {
 export declare const splitSrtIntoCues: (text: string) => SubtitleCue[];
 
 /**
- * A general-purpose, callback-driven source that can get its data from anywhere.
+ * An alias for {@link CustomSource}.
+ * @deprecated This name is misleading and will be removed in a future release. Please use {@link CustomSource} instead.
+ *
  * @group Input sources
  * @public
  */
-export declare class StreamSource extends Source {
-    /** Creates a new {@link StreamSource} whose behavior is specified by `options`.  */
-    constructor(options: StreamSourceOptions);
-}
+export declare const StreamSource: typeof CustomSource;
 
 /**
- * Options for defining a {@link StreamSource}.
+ * An alias for {@link CustomSourceOptions}.
+ * @deprecated This name is misleading and will be removed in a future release. Please use
+ * {@link CustomSourceOptions} instead.
+ *
  * @group Input sources
  * @public
  */
-export declare type StreamSourceOptions = {
-    /**
-     * Called when the size of the entire file is requested. Must return or resolve to the size in bytes. This function
-     * is guaranteed to be called before `read`.
-     */
-    getSize: () => MaybePromise<number>;
-    /**
-     * Called when data is requested. Must return or resolve to the bytes from the specified byte range, or a stream
-     * that yields these bytes.
-     */
-    read: (start: number, end: number) => MaybePromise<Uint8Array | ReadableStream<Uint8Array>>;
-    /**
-     * Called when the {@link Input} driven by this source is disposed.
-     */
-    dispose?: () => unknown;
-    /** The maximum number of bytes the cache is allowed to hold in memory. Defaults to 8 MiB. */
-    maxCacheSize?: number;
-    /**
-     * Specifies the prefetch profile that the reader should use with this source. A prefetch profile specifies the
-     * pattern with which bytes outside of the requested range are preloaded to reduce latency for future reads.
-     *
-     * - `'none'` (default): No prefetching; only the data needed in the moment is requested.
-     * - `'fileSystem'`: File system-optimized prefetching: a small amount of data is prefetched bidirectionally,
-     * aligned with page boundaries.
-     * - `'network'`: Network-optimized prefetching, or more generally, prefetching optimized for any high-latency
-     * environment: tries to minimize the amount of read calls and aggressively prefetches data when sequential access
-     * patterns are detected.
-     */
-    prefetchProfile?: 'none' | 'fileSystem' | 'network';
-};
+export declare type StreamSourceOptions = CustomSourceOptions;
 
 /**
  * This target writes data to a [`WritableStream`](https://developer.mozilla.org/en-US/docs/Web/API/WritableStream),
@@ -2933,15 +4142,54 @@ export declare type SubtitleTrackMetadata = BaseTrackMetadata & {};
  * @group Output targets
  * @public
  */
-export declare abstract class Target {
+export declare abstract class Target extends EventEmitter<TargetEvents> {
     /**
      * Called each time data is written to the target. Will be called with the byte range into which data was written.
      *
      * Use this callback to track the size of the output file as it grows. But be warned, this function is chatty and
      * gets called *extremely* often.
+     *
+     * @deprecated Use `target.on('write', ({ start, end }) => ...)` instead.
      */
     onwrite: ((start: number, end: number) => unknown) | null;
+    /**
+     * Returns a new {@link RangedTarget} that writes data to this target using the given offset.
+     *
+     * Useful for writing a file into a section of a larger file.
+     */
+    slice(offset: number): RangedTarget;
 }
+
+/**
+ * The events emitted by a {@link Target}.
+ * @group Output targets
+ * @public
+ */
+export declare type TargetEvents = {
+    /** Emitted each time data is written to the target. */
+    write: {
+        /** The start of the written range, inclusive. */
+        start: number;
+        /** The end of the written range, exclusive. */
+        end: number;
+    };
+    /** Emitted when the target is finalized. */
+    finalized: void;
+};
+
+/**
+ * A request for a {@link Target} at the given path.
+ * @group Output targets
+ * @public
+ */
+export declare type TargetRequest = {
+    /** The requested file path. */
+    path: FilePath;
+    /** Whether the to-be-written file will be the root file. */
+    isRoot: boolean;
+    /** The MIME type of the to-be-written file. */
+    mimeType: string;
+};
 
 /**
  * This source can be used to add subtitles from a subtitle text file.
@@ -2980,10 +4228,11 @@ export declare type TrackCountLimits = {
  */
 export declare type TrackDisposition = {
     /**
-     * Indicates that this track is eligible for automatic selection by a player; that it is the main track among other,
-     * non-default tracks of the same type.
+     * Indicates that this track is eligible for automatic selection by a player. Multiple tracks can be default tracks.
      */
     default: boolean;
+    /** Indicates that the track is the primary track among other tracks of its type. */
+    primary: boolean;
     /**
      * Indicates that players should always display this track by default, even if it goes against the user's default
      * preferences. For example, a subtitle track only containing translations of foreign-language audio.
@@ -3007,17 +4256,27 @@ export declare type TrackDisposition = {
 export declare type TrackType = typeof ALL_TRACK_TYPES[number];
 
 /**
+ * Thrown when trying to operate on an input that has an unsupported or unrecognizable format.
+ * @group Input files & tracks
+ * @public
+ */
+export declare class UnsupportedInputFormatError extends Error {
+    /** Creates a new {@link UnsupportedInputFormatError}. */
+    constructor(message?: string);
+}
+
+/**
  * A source backed by a URL. This is useful for reading data from the network. Requests will be made using an optimized
  * reading and prefetching pattern to minimize request count and latency.
  * @group Input sources
  * @public
  */
-export declare class UrlSource extends Source {
+export declare class UrlSource extends PathedSource {
     /**
      * Creates a new {@link UrlSource} backed by the resource at the specified URL.
      *
-     * When passing a `Request` instance, note that the `signal` and `headers.Range` options will be overridden by
-     * Mediabunny. If you want to cancel ongoing requests, use {@link Input.dispose}.
+     * When passing a `Request` instance, note that its `signal` will be overridden by Mediabunny; if you want to cancel
+     * ongoing requests, use {@link Input.dispose}.
      */
     constructor(url: string | URL | Request, options?: UrlSourceOptions);
 }
@@ -3032,17 +4291,17 @@ export declare type UrlSourceOptions = {
      * The [`RequestInit`](https://developer.mozilla.org/en-US/docs/Web/API/RequestInit) used by the Fetch API. Can be
      * used to further control the requests, such as setting custom headers.
      *
-     * All fields will work except for `signal` and `headers.Range`; these will be overridden by Mediabunny. If you want
-     * to cancel ongoing requests, use {@link Input.dispose}.
+     * The `signal` field is not available, as Mediabunny controls request cancellation internally. If you want to
+     * cancel ongoing requests, use {@link Input.dispose}.
      */
-    requestInit?: RequestInit;
+    requestInit?: Omit<RequestInit, 'signal'>;
     /**
      * A function that returns the delay (in seconds) before retrying a failed request. The function is called
      * with the number of previous, unsuccessful attempts, as well as with the error with which the previous request
      * failed. If the function returns `null`, no more retries will be made.
      *
      * By default, it uses an exponential backoff algorithm that never gives up unless
-     * a CORS error is suspected (`fetch()` did reject, `navigator.onLine` is true and origin is different)
+     * a CORS error is suspected (`fetch()` did reject, `navigator.onLine` is true and origin is different).
      */
     getRetryDelay?: (previousAttempts: number, error: unknown, url: string | URL | Request) => number | null;
     /** The maximum number of bytes the cache is allowed to hold in memory. Defaults to 64 MiB. */
@@ -3078,7 +4337,19 @@ export declare const VIDEO_SAMPLE_PIXEL_FORMATS: readonly ["I420", "I420P10", "I
 export declare type VideoCodec = typeof VIDEO_CODECS[number];
 
 /**
- * Additional options that control audio encoding.
+ * Describes a single data plane of a video frame.
+ * @group Samples
+ * @public
+ */
+export declare type VideoDataPlane = {
+    /** The data of the plane. */
+    data: Uint8Array;
+    /** The stride of the plane, in bytes. This is the distance in bytes between the start of each row of pixels. */
+    stride: number;
+};
+
+/**
+ * Additional options that control video encoding.
  * @group Encoding
  * @public
  */
@@ -3137,7 +4408,7 @@ export declare type VideoEncodingConfig = {
      */
     bitrate: number | Quality;
     /**
-     * The interval, in seconds, of how often frames are encoded as a key frame. The default is 5 seconds. Frequent key
+     * The interval, in seconds, of how often frames are encoded as a key frame. The default is 2 seconds. Frequent key
      * frames improve seeking behavior but increase file size. When using multiple video tracks, you should give them
      * all the same key frame interval.
      */
@@ -3155,6 +4426,10 @@ export declare type VideoEncodingConfig = {
      * The "original box" refers to the dimensions of the first encoded frame.
      */
     sizeChangeBehavior?: 'deny' | 'passThrough' | 'fill' | 'contain' | 'cover';
+    /**
+     * Optional transformations to apply to the video frames before they are passed to the encoder.
+     */
+    transform?: VideoTransformOptions;
     /** Called for each successfully encoded packet. Both the packet and the encoding metadata are passed. */
     onEncodedPacket?: (packet: EncodedPacket, meta: EncodedVideoChunkMetadata | undefined) => unknown;
     /**
@@ -3173,15 +4448,15 @@ export declare type VideoEncodingConfig = {
 export declare class VideoSample implements Disposable {
     /**
      * The internal pixel format in which the frame is stored. Will be `null` if it's using an arbitrary internal
-     * format not representable by `VideoPixelFormat`.
+     * format not representable by `VideoSamplePixelFormat`.
      * [See pixel formats](https://www.w3.org/TR/webcodecs/#pixel-format)
      */
     readonly format: VideoSamplePixelFormat | null;
     /** The visible region of the frame in the coded pixel grid. */
     readonly visibleRect: Rectangle;
-    /** The width of the frame in square pixels, before rotation is applied. */
+    /** The width of the frame in square pixels (respecting pixel aspect ratio), before rotation is applied. */
     readonly squarePixelWidth: number;
-    /** The height of the frame in square pixels, before rotation is applied. */
+    /** The height of the frame in square pixels (respecting pixel aspect ratio), before rotation is applied. */
     readonly squarePixelHeight: number;
     /** The rotation of the frame in degrees, clockwise. */
     readonly rotation: Rotation;
@@ -3199,6 +4474,8 @@ export declare class VideoSample implements Disposable {
     readonly duration: number;
     /** The color space of the frame. */
     readonly colorSpace: VideoSampleColorSpace;
+    /** The encode options to use when this sample is passed to an encoder. */
+    readonly encodeOptions: DeepReadonly<VideoEncoderEncodeOptions>;
     /** The width of the frame in pixels. */
     get codedWidth(): number;
     /** The height of the frame in pixels. */
@@ -3235,6 +4512,10 @@ export declare class VideoSample implements Disposable {
      * in `init`.
      */
     constructor(data: AllowSharedBufferSource, init: SetRequired<VideoSampleInit, 'format' | 'codedWidth' | 'codedHeight' | 'timestamp'>);
+    /**
+     * Creates a new {@link VideoSample} backed by a custom {@link VideoSampleResource}.
+     */
+    constructor(resource: VideoSampleResource, init: SetRequired<VideoSampleInit, 'timestamp'>);
     /** Clones this video sample. */
     clone(): VideoSample;
     /**
@@ -3243,11 +4524,11 @@ export declare class VideoSample implements Disposable {
      */
     close(): void;
     /**
-     * Returns the number of bytes required to hold this video sample's pixel data. Throws if `format` is `null`.
+     * Returns the number of bytes required to hold this video sample's pixel data.
      */
     allocationSize(options?: VideoFrameCopyToOptions): number;
     /**
-     * Copies this video sample's pixel data to an ArrayBuffer or ArrayBufferView. Throws if `format` is `null`.
+     * Copies this video sample's pixel data to an ArrayBuffer or ArrayBufferView.
      * @returns The byte layout of the planes of the copied data.
      */
     copyTo(destination: AllowSharedBufferSource, options?: VideoFrameCopyToOptions): Promise<PlaneLayout[]>;
@@ -3306,16 +4587,26 @@ export declare class VideoSample implements Disposable {
      * Converts this video sample to a
      * [`CanvasImageSource`](https://udn.realityripple.com/docs/Web/API/CanvasImageSource) for drawing to a canvas.
      *
-     * You must use the value returned by this method immediately, as any VideoFrame created internally will
+     * You must use the value returned by this method immediately, as any VideoFrame created internally may
      * automatically be closed in the next microtask.
      */
     toCanvasImageSource(): OffscreenCanvas | VideoFrame;
+    /**
+     * Transform this video sample to a new video sample given the options. Can be used to resize, rotate, and crop
+     * the sample.
+     *
+     * In non-browser environments, this method will not work by default. To make it work, register a custom
+     * transformer function via {@link registerVideoSampleTransformer}.
+     */
+    transform(options: VideoSampleTransformOptions): Promise<VideoSample>;
     /** Sets the rotation metadata of this video sample. */
     setRotation(newRotation: Rotation): void;
     /** Sets the presentation timestamp of this video sample, in seconds. */
     setTimestamp(newTimestamp: number): void;
     /** Sets the duration of this video sample, in seconds. */
     setDuration(newDuration: number): void;
+    /** Sets the encode options used when this sample is passed to an encoder. */
+    setEncodeOptions(newEncodeOptions: VideoEncoderEncodeOptions): void;
     /** Calls `.close()`. */
     [Symbol.dispose](): void;
 }
@@ -3371,6 +4662,8 @@ export declare type VideoSampleInit = {
     displayWidth?: number | undefined;
     /** Height of the frame in pixels after applying aspect ratio adjustments and rotation. */
     displayHeight?: number | undefined;
+    /** The encode options to use when this sample is passed to an encoder. */
+    encodeOptions?: DeepReadonly<VideoEncoderEncodeOptions>;
 };
 
 /**
@@ -3380,6 +4673,46 @@ export declare type VideoSampleInit = {
  * @public
  */
 export declare type VideoSamplePixelFormat = typeof VIDEO_SAMPLE_PIXEL_FORMATS[number];
+
+/**
+ * Abstract base class for custom video sample resources. Implement this class to provide custom backing
+ * for VideoSample instances.
+ * @group Samples
+ * @public
+ */
+export declare abstract class VideoSampleResource {
+    /**
+     * Returns the internal pixel format in which the frame is stored.
+     * [See pixel formats](https://developer.mozilla.org/en-US/docs/Web/API/VideoFrame/format)
+     */
+    abstract getFormat(): VideoSamplePixelFormat | null;
+    /** Returns the width of the frame in pixels. */
+    abstract getCodedWidth(): number;
+    /** Returns the height of the frame in pixels. */
+    abstract getCodedHeight(): number;
+    /** Returns the width of the frame in square pixels, respecting pixel aspect ratio. */
+    abstract getSquarePixelWidth(): number;
+    /** Returns the height of the frame in square pixels, respecting pixel aspect ratio. */
+    abstract getSquarePixelHeight(): number;
+    /** Returns the color space of the frame. */
+    abstract getColorSpace(): VideoSampleColorSpace;
+    /**
+     * Closes this resource, releasing held resources. Called automatically when the last {@link VideoSample} using this
+     * resource is closed.
+     */
+    abstract close(): void;
+    /**
+     * Returns the data planes that hold the video data for this sample. The returned planes and data must be in the
+     * format returned by `getFormat()`.
+     */
+    abstract getDataPlanes(): MaybePromise<VideoDataPlane[]>;
+    /**
+     * Returns a new RGB {@link VideoSample} that contains the same content as this sample. The provided `init` object
+     * must be used to set the metadata of this new video sample. When converting from a non-RGB format to RGB, the
+     * conversion must respect `colorSpace`.
+     */
+    abstract toRgbSample(init: SetRequired<VideoSampleInit, 'timestamp'>, colorSpace: PredefinedColorSpace): MaybePromise<VideoSample>;
+}
 
 /**
  * A sink that retrieves decoded video samples (video frames) from a video track.
@@ -3395,25 +4728,31 @@ export declare class VideoSampleSink extends BaseMediaSampleSink<VideoSample> {
      * Returns null if the timestamp is before the track's first timestamp.
      *
      * @param timestamp - The timestamp used for retrieval, in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    getSample(timestamp: number): Promise<VideoSample | null>;
+    getSample(timestamp: number, options?: PacketRetrievalOptions): Promise<VideoSample | null>;
     /**
      * Creates an async iterator that yields the video samples (frames) of this track in presentation order. This method
      * will intelligently pre-decode a few frames ahead to enable fast iteration.
      *
      * @param startTimestamp - The timestamp in seconds at which to start yielding samples (inclusive).
      * @param endTimestamp - The timestamp in seconds at which to stop yielding samples (exclusive).
+     * @param options - Options used for the underlying packet retrieval.
      */
-    samples(startTimestamp?: number, endTimestamp?: number): AsyncGenerator<VideoSample, void, unknown>;
+    samples(startTimestamp?: number, endTimestamp?: number, options?: PacketRetrievalOptions): AsyncGenerator<VideoSample, void, unknown>;
     /**
      * Creates an async iterator that yields a video sample (frame) for each timestamp in the argument. This method
      * uses an optimized decoding pipeline if these timestamps are monotonically sorted, decoding each packet at most
      * once, and is therefore more efficient than manually getting the sample for every timestamp. The iterator may
      * yield null if no frame is available for a given timestamp.
      *
+     * This method is good for sparse access of media data. If you want primarily sequential media access, prefer
+     * {@link VideoSampleSink.samples} instead.
+     *
      * @param timestamps - An iterable or async iterable of timestamps in seconds.
+     * @param options - Options used for the underlying packet retrieval.
      */
-    samplesAtTimestamps(timestamps: AnyIterable<number>): AsyncGenerator<VideoSample | null, void, unknown>;
+    samplesAtTimestamps(timestamps: AnyIterable<number>, options?: PacketRetrievalOptions): AsyncGenerator<VideoSample | null, void, unknown>;
 }
 
 /**
@@ -3436,6 +4775,92 @@ export declare class VideoSampleSource extends VideoSource {
      */
     add(videoSample: VideoSample, encodeOptions?: VideoEncoderEncodeOptions): Promise<void>;
 }
+
+/**
+ * A fully-resolved description of a video sample transformation, with all defaults and constraints baked in.
+ *
+ * The order of operations must be:
+ * 1. Pixel aspect ratio normalization (always applied)
+ * 2. Rotation
+ * 3. Crop
+ * 4. Resize using fit
+ * @group Samples
+ * @public
+ */
+export declare type VideoSampleTransformationDescription = {
+    /** The width in pixels to resize the frames to. */
+    width: number;
+    /** The height in pixels to resize the frames to. */
+    height: number;
+    /**
+     * The fitting algorithm.
+     *
+     * - `'fill'` will stretch the image to fill the entire box, potentially altering aspect ratio.
+     * - `'contain'` will contain the entire image within the box while preserving aspect ratio. This may lead to
+     * letterboxing.
+     * - `'cover'` will scale the image until the entire box is filled, while preserving aspect ratio.
+     */
+    fit: 'fill' | 'contain' | 'cover';
+    /** The clockwise rotation by which to rotate the frames. Rotation is applied before resizing. */
+    rotation: Rotation;
+    /**
+     * The rectangular region of the frames to crop to, clamped to the dimensions of the frame. Cropping is
+     * performed after rotation but before resizing.
+     */
+    crop: CropRectangle;
+    /** Whether to discard or keep the transparency information of the video sample. */
+    alpha: 'keep' | 'discard';
+};
+
+/**
+ * Options for transforming a {@link VideoSample}. The order of operations are:
+ *
+ * 1. Pixel aspect ratio normalization (always applied)
+ * 2. Rotation
+ * 3. Crop
+ * 4. Resize using fit
+ * @group Samples
+ * @public
+ */
+export declare type VideoSampleTransformOptions = {
+    /**
+     * The width in pixels to resize the frames to. If height is not set, it will be deduced
+     * automatically based on aspect ratio.
+     */
+    width?: number;
+    /**
+     * The height in pixels to resize the frames to. If width is not set, it will be deduced
+     * automatically based on aspect ratio.
+     */
+    height?: number;
+    /**
+     * A positive integer. When provided, both the width and height will be rounded to the nearest multiple of
+     * this number.
+     */
+    roundDimensionsTo?: number;
+    /**
+     * The fitting algorithm in case both width and height are set.
+     *
+     * - `'fill'` will stretch the image to fill the entire box, potentially altering aspect ratio.
+     * - `'contain'` will contain the entire image within the box while preserving aspect ratio. This may lead to
+     * letterboxing.
+     * - `'cover'` will scale the image until the entire box is filled, while preserving aspect ratio.
+     */
+    fit?: 'fill' | 'contain' | 'cover';
+    /**
+     * The clockwise rotation by which to rotate the frames. Rotation is applied before resizing.
+     */
+    rotate?: Rotation;
+    /**
+     * Specifies the rectangular region of the frames to crop to. The crop region will automatically be
+     * clamped to the dimensions of the frame. Cropping is performed after rotation but before resizing.
+     */
+    crop?: CropRectangle;
+    /**
+     * Whether to discard or keep the transparency information of the video sample. The default is `'keep'`.
+     */
+    alpha?: 'keep' | 'discard';
+};
 
 /**
  * Base class for video sources - sources for video tracks.
@@ -3461,6 +4886,73 @@ export declare type VideoTrackMetadata = BaseTrackMetadata & {
      * with the same timestamp.
      */
     frameRate?: number;
+    /**
+     * When true, this track is marked as being made only out of key frames (I-frames). It is an error to add a non-key
+     * frame to this track.
+     */
+    hasOnlyKeyPackets?: boolean;
+};
+
+/**
+ * Options for transforming video frames before encoding.
+ * @group Encoding
+ * @public
+ */
+export declare type VideoTransformOptions = {
+    /**
+     * The width in pixels to resize the frames to. If height is not set, it will be deduced
+     * automatically based on aspect ratio.
+     */
+    width?: number;
+    /**
+     * The height in pixels to resize the frames to. If width is not set, it will be deduced
+     * automatically based on aspect ratio.
+     */
+    height?: number;
+    /**
+     * The fitting algorithm in case both width and height are set.
+     *
+     * - `'fill'` will stretch the image to fill the entire box, potentially altering aspect ratio.
+     * - `'contain'` will contain the entire image within the box while preserving aspect ratio. This may lead to
+     * letterboxing.
+     * - `'cover'` will scale the image until the entire box is filled, while preserving aspect ratio.
+     *
+     * To avoid ambiguity, this field must not be set when `sizeChangeBehavior` is `'fill'`, `'contain'` or
+     * `'deny'`, since `sizeChangeBehavior` already determines the fitting algorithm.
+     */
+    fit?: 'fill' | 'contain' | 'cover';
+    /**
+     * The clockwise rotation by which to rotate the frames. Rotation is applied before resizing.
+     */
+    rotate?: Rotation;
+    /**
+     * Specifies the rectangular region of the frames to crop to. The crop region will automatically be
+     * clamped to the dimensions of the frame. Cropping is performed after rotation but before resizing.
+     */
+    crop?: CropRectangle;
+    /**
+     * Whether to discard or keep the transparency information of the video samples. The default is `'keep'`.
+     */
+    alpha?: 'keep' | 'discard';
+    /**
+     * The frame rate in hertz to normalize the video frame stream to.
+     */
+    frameRate?: number;
+    /**
+     * Allows for custom user-defined processing of video frames, e.g. for applying overlays, color transformations,
+     * or timestamp modifications. Will be called for each video frame after transformations and frame rate
+     * corrections.
+     *
+     * Must return a {@link VideoSample}, a {@link VideoSampleResource} or a `CanvasImageSource`, an array of them, or
+     * `null` for dropping the frame. When non-timestamped data is returned, the timestamp and duration from the input
+     * sample will be used.
+     */
+    process?: (sample: VideoSample) => MaybePromise<CanvasImageSource | VideoSample | VideoSampleResource | (CanvasImageSource | VideoSample | VideoSampleResource)[] | null>;
+    /**
+     * Forces every video frame through the transformation step even if no transformation properties are defined.
+     * This can be used, for example, to bake rotation into the encoded video frames.
+     */
+    force?: boolean;
 };
 
 /**

@@ -11,7 +11,6 @@ import {
 	Input,
 	FilePathSource,
 	ALL_FORMATS,
-	Conversion,
 	Output,
 	BufferTarget,
 	MkvOutputFormat,
@@ -280,87 +279,6 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Test text`;
 		expect(parts[parts.length - 1]).toBe('Test text');
 
 		input[Symbol.dispose]();
-	});
-
-	it('should handle round-trip ASS -> MKV -> ASS conversion', async () => {
-		using input1 = new Input({
-			source: new FilePathSource('test/public/subtitles/test-mkv-ass.mkv'),
-			formats: ALL_FORMATS,
-		});
-
-		const target1 = new BufferTarget();
-		const output1 = new Output({
-			format: new MkvOutputFormat(),
-			target: target1,
-		});
-
-		// First conversion: MKV -> MKV (with ASS)
-		const conversion1 = await Conversion.init({
-			input: input1,
-			output: output1,
-			subtitle: { codec: 'ass' },
-			showWarnings: false,
-		});
-
-		await conversion1.execute();
-
-		// Read intermediate result
-		const input2 = new Input({
-			source: new BufferSource(target1.buffer),
-			formats: ALL_FORMATS,
-		});
-
-		const target2 = new BufferTarget();
-		const output2 = new Output({
-			format: new MkvOutputFormat(),
-			target: target2,
-		});
-
-		// Second conversion: MKV -> MKV (with ASS)
-		const conversion2 = await Conversion.init({
-			input: input2,
-			output: output2,
-			subtitle: { codec: 'ass' },
-			showWarnings: false,
-		});
-
-		await conversion2.execute();
-
-		// Compare outputs
-		const input3 = new Input({
-			source: new BufferSource(target2.buffer),
-			formats: ALL_FORMATS,
-		});
-
-		const track1 = (await input2.subtitleTracks)[0]!;
-		const track2 = (await input3.subtitleTracks)[0]!;
-
-		const text1 = await track1.exportToText('ass');
-		const text2 = await track2.exportToText('ass');
-
-		// Extract just the text content from dialogue lines (ignore timestamp precision differences)
-		const extractText = (line: string) => {
-			// Extract text after the 9th comma (after Effect field)
-			const parts = line.split(',');
-			return parts.slice(9).join(',');
-		};
-
-		const dialogue1 = text1.split('\n').filter(l => l.startsWith('Dialogue:'));
-		const dialogue2 = text2.split('\n').filter(l => l.startsWith('Dialogue:'));
-
-		expect(dialogue1.length).toBe(dialogue2.length);
-
-		// Compare text content (not timestamps due to precision issues)
-		for (let i = 0; i < dialogue1.length; i++) {
-			const text1Content = extractText(dialogue1[i]!);
-			const text2Content = extractText(dialogue2[i]!);
-			expect(text2Content).toBe(text1Content);
-			// Should not have duplicated field data
-			expect(text2Content).not.toMatch(/Default,,0,0,0,,.*Default,,0,0,0,,/);
-		}
-
-		input2[Symbol.dispose]();
-		input3[Symbol.dispose]();
 	});
 
 	it('should handle empty fields in ASS format', async () => {

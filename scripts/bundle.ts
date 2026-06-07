@@ -11,11 +11,13 @@ const createVariants = async (
 	umdExtension: string,
 	specificUmdConfig: esbuild.BuildOptions = {},
 	specificEsmConfig: esbuild.BuildOptions = {},
+	nodeUmdVariant = false,
 ) => {
 	const baseConfig: esbuild.BuildOptions = {
 		entryPoints: [entryPoint],
 		bundle: true,
 		logLevel: 'info',
+		target: 'es2021',
 		logOverride: {
 			'import-is-undefined': 'silent', // Warning caused by the disabled "node.ts" import
 		},
@@ -72,7 +74,19 @@ const createVariants = async (
 		minify: true,
 	});
 
-	return [umdVariant, esmVariant, umdMinifiedVariant, esmMinifiedVariant];
+	const variants = [umdVariant, esmVariant, umdMinifiedVariant, esmMinifiedVariant];
+
+	if (nodeUmdVariant) {
+		const nodeVariant = await esbuild.context({
+			...umdConfig,
+			...specificUmdConfig,
+			outfile: `${outfileBase}.node.${umdExtension}`,
+			platform: 'node', // This is different
+		});
+		variants.push(nodeVariant);
+	}
+
+	return variants;
 };
 
 const mediabunnyVariants = await createVariants(
@@ -80,6 +94,9 @@ const mediabunnyVariants = await createVariants(
 	'Mediabunny',
 	'dist/bundles/mediabunny',
 	'cjs',
+	undefined,
+	undefined,
+	true,
 );
 
 const mp3EncoderVariants = await createVariants(
@@ -206,12 +223,30 @@ const flacEncoderVariants = await createVariants(
 	},
 );
 
+const serverVariants = await createVariants(
+	'packages/server/src/index.ts',
+	'MediabunnyServer',
+	'packages/server/dist/bundles/mediabunny-server',
+	'cjs',
+	{
+		platform: 'node',
+		packages: 'external',
+		external: ['mediabunny'],
+	},
+	{
+		platform: 'node',
+		packages: 'external',
+		external: ['mediabunny'],
+	},
+);
+
 const contexts = [
 	...mediabunnyVariants,
 	...mp3EncoderVariants,
 	...ac3Variants,
 	...aacEncoderVariants,
 	...flacEncoderVariants,
+	...serverVariants,
 ];
 
 if (process.argv[2] === '--watch') {

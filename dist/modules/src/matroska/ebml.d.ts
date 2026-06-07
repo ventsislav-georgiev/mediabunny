@@ -145,10 +145,10 @@ export declare enum EBMLId {
 export declare const LEVEL_0_EBML_IDS: EBMLId[];
 export declare const LEVEL_1_EBML_IDS: EBMLId[];
 export declare const LEVEL_0_AND_1_EBML_IDS: EBMLId[];
-export declare const measureUnsignedInt: (value: number) => 1 | 2 | 3 | 4 | 5 | 6;
-export declare const measureUnsignedBigInt: (value: bigint) => 8 | 7 | 1 | 2 | 3 | 4 | 5 | 6;
-export declare const measureSignedInt: (value: number) => 1 | 2 | 3 | 4 | 5 | 6;
-export declare const measureVarInt: (value: number) => 1 | 2 | 3 | 4 | 5 | 6;
+export declare const measureUnsignedInt: (value: number) => 1 | 5 | 6 | 2 | 4 | 3;
+export declare const measureUnsignedBigInt: (value: bigint) => 8 | 7 | 1 | 5 | 6 | 2 | 4 | 3;
+export declare const measureSignedInt: (value: number) => 1 | 5 | 6 | 2 | 4 | 3;
+export declare const measureVarInt: (value: number) => 1 | 5 | 6 | 2 | 4 | 3;
 export declare class EBMLWriter {
     private writer;
     helper: Uint8Array<ArrayBuffer>;

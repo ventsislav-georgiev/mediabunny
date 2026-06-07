@@ -25,12 +25,14 @@ export class WaveMuxer extends Muxer {
         this.ds64DataSizePos = null;
         this.ds64SampleCountPos = null;
         this.format = format;
-        this.writer = output._writer;
-        this.riffWriter = new RiffWriter(output._writer);
         this.isRf64 = !!format._options.large;
     }
     async start() {
-        // Nothing needed here - we'll write the header with the first sample
+        const release = await this.mutex.acquire();
+        this.writer = await this.output._getRootWriter(false);
+        this.riffWriter = new RiffWriter(this.writer);
+        // No writing needed here - we'll write the header with the first sample
+        release();
     }
     async getMimeType() {
         return 'audio/wav';
@@ -49,7 +51,7 @@ export class WaveMuxer extends Muxer {
                 this.sampleRate = meta.decoderConfig.sampleRate;
                 this.headerWritten = true;
             }
-            this.validateAndNormalizeTimestamp(track, packet.timestamp, packet.type === 'key');
+            this.validateTimestamp(track, packet.timestamp, packet.type === 'key');
             if (!this.isRf64 && this.writer.getPos() + packet.data.byteLength >= 2 ** 32) {
                 throw new Error('Adding more audio data would exceed the maximum RIFF size of 4 GiB. To write larger files, use'
                     + ' RF64 by setting `large: true` in the WavOutputFormatOptions.');
@@ -312,7 +314,6 @@ export class WaveMuxer extends Muxer {
             this.writer.seek(this.dataSizePos);
             this.riffWriter.writeU32(this.dataSize);
         }
-        this.writer.seek(endPos);
         release();
     }
 }

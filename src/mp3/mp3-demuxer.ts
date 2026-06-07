@@ -9,12 +9,27 @@
 import { AudioCodec } from '../codec';
 import { Demuxer } from '../demuxer';
 import { Input } from '../input';
-import { InputAudioTrack, InputAudioTrackBacking } from '../input-track';
+import { InputAudioTrackBacking } from '../input-track';
 import { DEFAULT_TRACK_DISPOSITION, MetadataTags } from '../metadata';
 import { PacketRetrievalOptions } from '../media-sink';
-import { assert, AsyncMutex, binarySearchExact, binarySearchLessOrEqual, UNDETERMINED_LANGUAGE } from '../misc';
+import {
+	assert,
+	AsyncMutex,
+	binarySearchExact,
+	binarySearchLessOrEqual,
+	toDataView,
+	UNDETERMINED_LANGUAGE,
+} from '../misc';
 import { EncodedPacket, PLACEHOLDER_DATA } from '../packet';
-import { Mp3FrameHeader, getXingOffset, INFO, XING } from '../../shared/mp3-misc';
+import {
+	Mp3FrameHeader,
+	getXingOffset,
+	INFO,
+	XING,
+	XingFlags,
+	computeAverageMp3FrameSize,
+	getMp3ChannelCount,
+} from '../../shared/mp3-misc';
 import {
 	ID3_V1_TAG_SIZE,
 	ID3_V2_HEADER_SIZE,
@@ -37,10 +52,15 @@ export class Mp3Demuxer extends Demuxer {
 
 	metadataPromise: Promise<void> | null = null;
 	firstFrameHeader: Mp3FrameHeader | null = null;
+	firstFrameHeaderPos: number | null = null;
 	loadedSamples: Sample[] = []; // All samples from the start of the file to lastLoadedPos
 	metadataTags: MetadataTags | null = null;
+	xingData: {
+		frameCount: number | null;
+		fileSize: number | null;
+	} | null = null;
 
-	tracks: InputAudioTrack[] = [];
+	trackBackings: Mp3AudioTrackBacking[] = [];
 
 	readingMutex = new AsyncMutex();
 	lastSampleLoaded = false;
@@ -64,7 +84,7 @@ export class Mp3Demuxer extends Demuxer {
 				throw new Error('No valid MP3 frame found.');
 			}
 
-			this.tracks = [new InputAudioTrack(this.input, new Mp3AudioTrackBacking(this))];
+			this.trackBackings = [new Mp3AudioTrackBacking(this)];
 		})();
 	}
 
@@ -89,7 +109,12 @@ export class Mp3Demuxer extends Demuxer {
 			}
 		}
 
-		const result = await readNextMp3FrameHeader(this.reader, this.lastLoadedPos, this.reader.fileSize);
+		const result = await readNextMp3FrameHeader(
+			this.reader,
+			this.lastLoadedPos,
+			this.reader.fileSize,
+			this.firstFrameHeader,
+		);
 		if (!result) {
 			this.lastSampleLoaded = true;
 			return;
@@ -109,19 +134,33 @@ export class Mp3Demuxer extends Demuxer {
 
 			if (isXing) {
 				// There's no actual audio data in this frame, so let's skip it
+
+				if (!this.xingData) {
+					let xingDataSlice = this.reader.requestSlice(result.startPos + xingOffset + 4, 12);
+					if (xingDataSlice instanceof Promise) xingDataSlice = await xingDataSlice;
+					if (xingDataSlice) {
+						const xingData = readBytes(xingDataSlice, 12);
+						const view = toDataView(xingData);
+						const flags = view.getUint32(0, false);
+
+						this.xingData = {
+							frameCount: (flags & XingFlags.FrameCount)
+								? view.getUint32(4, false)
+								: null,
+							fileSize: (flags & XingFlags.FileSize)
+								? view.getUint32(8, false)
+								: null,
+						};
+					}
+				}
+
 				return;
 			}
 		}
 
 		if (!this.firstFrameHeader) {
 			this.firstFrameHeader = header;
-		}
-
-		if (header.sampleRate !== this.firstFrameHeader.sampleRate) {
-			console.warn(
-				`MP3 changed sample rate mid-file: ${this.firstFrameHeader.sampleRate} Hz to ${header.sampleRate} Hz.`
-				+ ` Might be a bug, so please report this file.`,
-			);
+			this.firstFrameHeaderPos = result.startPos;
 		}
 
 		const sampleDuration = header.audioSamplesInFrame / this.firstFrameHeader.sampleRate;
@@ -142,18 +181,9 @@ export class Mp3Demuxer extends Demuxer {
 		return 'audio/mpeg';
 	}
 
-	async getTracks() {
+	async getTrackBackings() {
 		await this.readMetadata();
-		return this.tracks;
-	}
-
-	async computeDuration() {
-		await this.readMetadata();
-
-		const track = this.tracks[0];
-		assert(track);
-
-		return track.computeDuration();
+		return this.trackBackings;
 	}
 
 	async getMetadataTags() {
@@ -213,6 +243,10 @@ export class Mp3Demuxer extends Demuxer {
 class Mp3AudioTrackBacking implements InputAudioTrackBacking {
 	constructor(public demuxer: Mp3Demuxer) {}
 
+	getType() {
+		return 'audio' as const;
+	}
+
 	getId() {
 		return 1;
 	}
@@ -221,18 +255,62 @@ class Mp3AudioTrackBacking implements InputAudioTrackBacking {
 		return 1;
 	}
 
-	async getFirstTimestamp() {
-		return 0;
-	}
-
 	getTimeResolution() {
 		assert(this.demuxer.firstFrameHeader);
 		return this.demuxer.firstFrameHeader.sampleRate / this.demuxer.firstFrameHeader.audioSamplesInFrame;
 	}
 
-	async computeDuration() {
-		const lastPacket = await this.getPacket(Infinity, { metadataOnly: true });
-		return (lastPacket?.timestamp ?? 0) + (lastPacket?.duration ?? 0);
+	isRelativeToUnixEpoch() {
+		return false;
+	}
+
+	getPairingMask() {
+		return 1n;
+	}
+
+	getBitrate() {
+		return null;
+	}
+
+	getAverageBitrate() {
+		return null;
+	}
+
+	async getDurationFromMetadata() {
+		const demuxer = this.demuxer;
+
+		assert(demuxer.firstFrameHeader !== null);
+		assert(demuxer.firstFrameHeaderPos !== null);
+
+		if (demuxer.xingData) {
+			if (demuxer.xingData.frameCount !== null) {
+				return demuxer.xingData.frameCount
+					* demuxer.firstFrameHeader.audioSamplesInFrame
+					/ demuxer.firstFrameHeader.sampleRate;
+			}
+		} else {
+			// No Xing, assuming CBR
+
+			if (demuxer.reader.fileSize !== null) {
+				const averageFrameSize = computeAverageMp3FrameSize(
+					demuxer.firstFrameHeader.lowSamplingFrequency,
+					demuxer.firstFrameHeader.layer,
+					demuxer.firstFrameHeader.bitrate,
+					demuxer.firstFrameHeader.sampleRate,
+				);
+				const frameCount = (demuxer.reader.fileSize - demuxer.firstFrameHeaderPos) / averageFrameSize;
+
+				return Math.round(frameCount)
+					* demuxer.firstFrameHeader.audioSamplesInFrame
+					/ demuxer.firstFrameHeader.sampleRate;
+			}
+		}
+
+		return null;
+	}
+
+	async getLiveRefreshInterval() {
+		return null;
 	}
 
 	getName() {
@@ -253,7 +331,7 @@ class Mp3AudioTrackBacking implements InputAudioTrackBacking {
 
 	getNumberOfChannels() {
 		assert(this.demuxer.firstFrameHeader);
-		return this.demuxer.firstFrameHeader.channel === 3 ? 1 : 2;
+		return getMp3ChannelCount(this.demuxer.firstFrameHeader.channel);
 	}
 
 	getSampleRate() {
@@ -272,7 +350,7 @@ class Mp3AudioTrackBacking implements InputAudioTrackBacking {
 
 		return {
 			codec: 'mp3',
-			numberOfChannels: this.demuxer.firstFrameHeader.channel === 3 ? 1 : 2,
+			numberOfChannels: getMp3ChannelCount(this.demuxer.firstFrameHeader.channel),
 			sampleRate: this.demuxer.firstFrameHeader.sampleRate,
 		};
 	}

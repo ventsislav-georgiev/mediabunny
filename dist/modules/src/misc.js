@@ -153,8 +153,17 @@ export class AsyncMutex {
         return resolver;
     }
 }
+export const HEX_STRING_REGEX = /^[0-9a-fA-F]+$/;
 export const bytesToHexString = (bytes) => {
     return [...bytes].map(x => x.toString(16).padStart(2, '0')).join('');
+};
+export const hexStringToBytes = (hexString) => {
+    assert(hexString.length % 2 === 0);
+    const bytes = new Uint8Array(hexString.length / 2);
+    for (let i = 0; i < hexString.length; i += 2) {
+        bytes[i / 2] = parseInt(hexString.slice(i, i + 2), 16);
+    }
+    return bytes;
 };
 export const reverseBitsU32 = (x) => {
     x = ((x >> 1) & 0x55555555) | ((x & 0x55555555) << 1);
@@ -350,8 +359,14 @@ export const roundIfAlmostInteger = (value) => {
 export const roundToMultiple = (value, multiple) => {
     return Math.round(value / multiple) * multiple;
 };
+export const roundToDivisor = (value, multiple) => {
+    return Math.round(value * multiple) / multiple;
+};
 export const floorToMultiple = (value, multiple) => {
     return Math.floor(value / multiple) * multiple;
+};
+export const floorToDivisor = (value, multiple) => {
+    return Math.floor(value * multiple) / multiple;
 };
 export const ilog = (x) => {
     let ret = 0;
@@ -392,7 +407,7 @@ export const mergeRequestInit = (init1, init2) => {
     return merged;
 };
 /** Normalizes HeadersInit to a Record<string, string> format. */
-const normalizeHeaders = (headers) => {
+export const normalizeHeaders = (headers) => {
     if (headers instanceof Headers) {
         const result = {};
         headers.forEach((value, key) => {
@@ -429,7 +444,7 @@ export const retriedFetch = async (fetchFn, url, requestInit, getRetryDelay, sho
                 throw new TypeError('Retry delay must be a non-negative finite number.');
             }
             if (retryDelayInSeconds > 0) {
-                await new Promise(resolve => setTimeout(resolve, 1000 * retryDelayInSeconds));
+                await wait(1000 * retryDelayInSeconds);
             }
             if (shouldStop()) {
                 throw error;
@@ -452,8 +467,8 @@ export const computeRationalApproximation = (x, maxDenominator) => {
         const nextDenominator = integer * currDenominator + prevDenominator;
         if (nextDenominator > maxDenominator) {
             return {
-                numerator: sign * currNumerator,
-                denominator: currDenominator,
+                num: sign * currNumerator,
+                den: currDenominator,
             };
         }
         prevNumerator = currNumerator;
@@ -467,8 +482,8 @@ export const computeRationalApproximation = (x, maxDenominator) => {
         }
     }
     return {
-        numerator: sign * currNumerator,
-        denominator: currDenominator,
+        num: sign * currNumerator,
+        den: currDenominator,
     };
 };
 export class CallSerializer {
@@ -486,7 +501,9 @@ export const isWebKit = () => {
     }
     // This even returns true for WebKit-wrapping browsers such as Chrome on iOS
     return isWebKitCache = !!(typeof navigator !== 'undefined'
-        && (navigator.vendor?.match(/apple/i)
+        && (
+        // eslint-disable-next-line @typescript-eslint/no-deprecated
+        navigator.vendor?.match(/apple/i)
             // Or, in workers:
             || (/AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent))
             || /\b(iPad|iPhone|iPod)\b/.test(navigator.userAgent)));
@@ -504,6 +521,7 @@ export const isChromium = () => {
         return isChromiumCache;
     }
     return isChromiumCache = !!(typeof navigator !== 'undefined'
+        // eslint-disable-next-line @typescript-eslint/no-deprecated
         && (navigator.vendor?.includes('Google Inc') || /Chrome/.test(navigator.userAgent)));
 };
 let chromiumVersionCache = null;
@@ -596,7 +614,101 @@ export const polyfillSymbolDispose = () => {
 export const isNumber = (x) => {
     return typeof x === 'number' && !Number.isNaN(x);
 };
+export const joinPaths = (basePath, relativePath) => {
+    // If relativePath is a full URL with protocol, return it as-is
+    if (relativePath.includes('://')) {
+        return relativePath;
+    }
+    // Strip query parameters from URL base paths so their contents don't mess up the join
+    if (basePath.includes('://')) {
+        const queryIndex = basePath.indexOf('?');
+        if (queryIndex !== -1) {
+            basePath = basePath.slice(0, queryIndex);
+        }
+    }
+    let result;
+    if (relativePath.startsWith('/')) {
+        const protocolIndex = basePath.indexOf('://');
+        if (protocolIndex === -1) {
+            result = relativePath;
+        }
+        else {
+            const pathStart = basePath.indexOf('/', protocolIndex + 3);
+            if (pathStart === -1) {
+                result = basePath + relativePath;
+            }
+            else {
+                result = basePath.slice(0, pathStart) + relativePath;
+            }
+        }
+    }
+    else {
+        const lastSlash = basePath.lastIndexOf('/');
+        if (lastSlash === -1) {
+            result = relativePath;
+        }
+        else {
+            result = basePath.slice(0, lastSlash + 1) + relativePath;
+        }
+    }
+    // Normalize ./ and ../
+    let prefix = '';
+    const protocolIndex = result.indexOf('://');
+    if (protocolIndex !== -1) {
+        const pathStart = result.indexOf('/', protocolIndex + 3);
+        if (pathStart !== -1) {
+            prefix = result.slice(0, pathStart);
+            result = result.slice(pathStart);
+        }
+    }
+    const segments = result.split('/');
+    const normalized = [];
+    for (const segment of segments) {
+        if (segment === '..') {
+            normalized.pop();
+        }
+        else if (segment !== '.') {
+            normalized.push(segment);
+        }
+    }
+    return prefix + normalized.join('/');
+};
+export const arrayCount = (array, predicate) => {
+    let count = 0;
+    for (let i = 0; i < array.length; i++) {
+        if (predicate(array[i])) {
+            count++;
+        }
+    }
+    return count;
+};
+export const arrayArgmin = (array, getValue) => {
+    let minIndex = -1;
+    let minValue = Infinity;
+    for (let i = 0; i < array.length; i++) {
+        const value = getValue(array[i]);
+        if (value < minValue) {
+            minValue = value;
+            minIndex = i;
+        }
+    }
+    return minIndex;
+};
+export const arrayArgmax = (array, getValue) => {
+    let maxIndex = -1;
+    let maxValue = -Infinity;
+    for (let i = 0; i < array.length; i++) {
+        const value = getValue(array[i]);
+        if (value > maxValue) {
+            maxValue = value;
+            maxIndex = i;
+        }
+    }
+    return maxIndex;
+};
 export const simplifyRational = (rational) => {
+    assert(Number.isInteger(rational.num));
+    assert(Number.isInteger(rational.den));
     assert(rational.den !== 0);
     let a = Math.abs(rational.num);
     let b = Math.abs(rational.den);
@@ -764,4 +876,117 @@ export const clearIntervalUnthrottled = (timer) => {
         type: 'clear-interval',
         timerId: timer.id,
     });
+};
+export const wait = (ms) => {
+    return new Promise(resolve => setTimeout(resolve, ms));
+};
+export const rejectAfter = (ms, message = 'Promise rejected') => {
+    return new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(message)), ms);
+    });
+};
+export const toArray = (x) => {
+    if (Array.isArray(x)) {
+        return x;
+    }
+    else {
+        return [x];
+    }
+};
+/**
+ * A class that manages event listeners and dispatches events to them.
+ *
+ * @group Miscellaneous
+ * @public
+ */
+export class EventEmitter {
+    constructor() {
+        /** @internal */
+        this._listeners = new Map();
+    }
+    /** Registers a listener for the given event. */
+    on(event, listener, options) {
+        if (!this._listeners.has(event)) {
+            this._listeners.set(event, new Set());
+        }
+        const entry = { fn: listener, once: options?.once ?? false };
+        this._listeners.get(event).add(entry);
+        return () => {
+            this._listeners.get(event)?.delete(entry);
+        };
+    }
+    /** @internal */
+    _emit(...args) {
+        const [event, data] = args;
+        const listeners = this._listeners.get(event);
+        if (!listeners) {
+            return;
+        }
+        for (const entry of listeners) {
+            try {
+                entry.fn(data);
+            }
+            catch (error) {
+                console.error(error);
+            }
+            if (entry.once) {
+                listeners.delete(entry);
+            }
+        }
+    }
+}
+export const ceilToMultipleOfTwo = (value) => Math.ceil(value / 2) * 2;
+/**
+ * Utility class for running async functions in parallel up to a certain level of parallelism. Can be used to apply
+ * backpressure only if the concurrency level would be exceeded.
+ *
+ * @group Miscellaneous
+ * @public
+*/
+export class ConcurrentRunner {
+    constructor(parallelism) {
+        /** @internal */
+        this._queue = [];
+        /** @internal */
+        this._errored = false;
+        this.parallelism = parallelism;
+    }
+    /** Whether any function has errored. The runner is effectively bricked if this is `true`, by design. */
+    get errored() {
+        return this._errored;
+    }
+    /** The number of tasks currently running. */
+    get inFlightCount() {
+        return this._queue.length;
+    }
+    /**
+     * Schedules an async function to be run. If the maximum allowed level of parallelism has not yet been reached,
+     * the function will be executed immediately and `run()` will resolve immediately. Otherwise, the function will be
+     * called as soon as any currently-running function finishes, and `run()` will only resolve then.
+     *
+     * Throws if the runner is errored.
+     */
+    async run(fn) {
+        if (this._errored) {
+            await Promise.race(this._queue); // Will surface the error
+        }
+        while (this._queue.length >= this.parallelism) {
+            await Promise.race(this._queue);
+        }
+        const promise = fn();
+        this._queue.push(promise);
+        void promise
+            .then(() => removeItem(this._queue, promise))
+            .catch(() => this._errored = true);
+    }
+    /** Waits for all currently running functions to finish. Throws if the runner is errored. */
+    async flush() {
+        await Promise.all(this._queue);
+    }
+}
+export const isRecordStringString = (value) => {
+    return value !== null
+        && typeof value === 'object'
+        && Object.getPrototypeOf(value) === Object.prototype
+        && Object.values(value).every(x => typeof x === 'string');
 };

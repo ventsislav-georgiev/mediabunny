@@ -634,6 +634,19 @@ const skipAvcHrdParameters = (bitstream) => {
     bitstream.skipBits(5); // dpb_output_delay_length_minus1
     bitstream.skipBits(5); // time_offset_length
 };
+export const concatHevcNalUnits = (nalUnits, decoderConfig) => {
+    if (decoderConfig.description) {
+        // Stream is length-prefixed. Let's extract the size of the length prefix from the decoder config
+        const bytes = toUint8Array(decoderConfig.description);
+        const lengthSizeMinusOne = bytes[21] & 0b11;
+        const lengthSize = (lengthSizeMinusOne + 1);
+        return concatNalUnitsInLengthPrefixed(nalUnits, lengthSize);
+    }
+    else {
+        // Stream is in Annex B format
+        return concatNalUnitsInAnnexB(nalUnits);
+    }
+};
 export const iterateHevcNalUnits = (packetData, decoderConfig) => {
     if (decoderConfig.description) {
         const bytes = toUint8Array(decoderConfig.description);
@@ -1263,6 +1276,96 @@ export const deserializeHevcDecoderConfigurationRecord = (data) => {
         console.error('Error deserializing HEVC Decoder Configuration Record:', error);
         return null;
     }
+};
+var HevcNaluOrderState;
+(function (HevcNaluOrderState) {
+    HevcNaluOrderState[HevcNaluOrderState["audAllowed"] = 0] = "audAllowed";
+    HevcNaluOrderState[HevcNaluOrderState["beforeFirstVcl"] = 1] = "beforeFirstVcl";
+    HevcNaluOrderState[HevcNaluOrderState["afterFirstVcl"] = 2] = "afterFirstVcl";
+    HevcNaluOrderState[HevcNaluOrderState["eoBitstreamAllowed"] = 3] = "eoBitstreamAllowed";
+    HevcNaluOrderState[HevcNaluOrderState["noMoreDataAllowed"] = 4] = "noMoreDataAllowed";
+})(HevcNaluOrderState || (HevcNaluOrderState = {}));
+// This function sanitzes the contents of an HEVC packet such that
+// https://source.chromium.org/chromium/chromium/src/+/main:media/formats/mp4/hevc.cc's validation logic does not trip
+// up on its contents. The validation is often too strict and rejects packets that Chromium could decode just fine.
+// Chromium code retrieved on 2026-04-29.
+// See https://issues.chromium.org/issues/507611247.
+export const sanitizeHevcPacketForChromium = (packetData, decoderConfig) => {
+    const removedNalUnits = new Set();
+    let orderState = HevcNaluOrderState.audAllowed;
+    for (const loc of iterateHevcNalUnits(packetData, decoderConfig)) {
+        if (orderState === HevcNaluOrderState.noMoreDataAllowed) {
+            removedNalUnits.add(loc.offset);
+            continue;
+        }
+        const type = extractNalUnitTypeForHevc(packetData[loc.offset]);
+        if (orderState === HevcNaluOrderState.eoBitstreamAllowed && type !== 37 /* EOB_NUT */) {
+            removedNalUnits.add(loc.offset);
+            continue;
+        }
+        let remove = false;
+        if (type === 35) { // AUD_NUT
+            if (orderState > HevcNaluOrderState.audAllowed) {
+                remove = true;
+            }
+            else {
+                orderState = HevcNaluOrderState.beforeFirstVcl;
+            }
+        }
+        else if (type <= 31) { // VCL (0-31)
+            if (orderState > HevcNaluOrderState.afterFirstVcl) {
+                remove = true;
+            }
+            else {
+                orderState = HevcNaluOrderState.afterFirstVcl;
+            }
+        }
+        else if (type === 36) { // EOS_NUT
+            if (orderState !== HevcNaluOrderState.afterFirstVcl) {
+                remove = true;
+            }
+            else {
+                orderState = HevcNaluOrderState.eoBitstreamAllowed;
+            }
+        }
+        else if (type === 37) { // EOB_NUT
+            if (orderState < HevcNaluOrderState.afterFirstVcl) {
+                remove = true;
+            }
+            else {
+                orderState = HevcNaluOrderState.noMoreDataAllowed;
+            }
+        }
+        else if (type === 32 || type === 33 || type === 34 || type === 39
+            || (type >= 41 && type <= 44) || (type >= 48 && type <= 55)) { // VPS, SPS, PPS, PREFIX_SEI, RSV_NVCL41..44, UNSPEC48..55
+            if (orderState > HevcNaluOrderState.beforeFirstVcl) {
+                remove = true;
+            }
+            else {
+                orderState = HevcNaluOrderState.beforeFirstVcl;
+            }
+        }
+        else if (type === 38 || type === 40
+            || (type >= 45 && type <= 47) || (type >= 56 && type <= 63)) { // FD, SUFFIX_SEI, RSV_NVCL45..47, UNSPEC56..63
+            if (orderState < HevcNaluOrderState.afterFirstVcl) {
+                remove = true;
+            }
+        }
+        if (remove) {
+            removedNalUnits.add(loc.offset);
+        }
+    }
+    // If nothing violated the rules, return null to signal that
+    if (removedNalUnits.size === 0) {
+        return null;
+    }
+    const filteredNalUnits = [];
+    for (const loc of iterateHevcNalUnits(packetData, decoderConfig)) {
+        if (!removedNalUnits.has(loc.offset)) {
+            filteredNalUnits.push(packetData.subarray(loc.offset, loc.offset + loc.length));
+        }
+    }
+    return concatHevcNalUnits(filteredNalUnits, decoderConfig);
 };
 export const extractVp9CodecInfoFromPacket = (packet) => {
     // eslint-disable-next-line @stylistic/max-len
