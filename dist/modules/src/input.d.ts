@@ -5,12 +5,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import { DurationMetadataRequestOptions } from './demuxer.js';
-import { InputFormat, InputFormatOptions } from './input-format.js';
-import { InputAudioTrack, InputSubtitleTrack, InputTrack, InputVideoTrack, InputTrackQuery } from './input-track.js';
-import { PacketRetrievalOptions } from './media-sink.js';
-import { EventEmitter } from './misc.js';
-import { Source, SourceRef, SourceRequest } from './source.js';
+import { Demuxer, DurationMetadataRequestOptions } from './demuxer';
+import { InputFormat, InputFormatOptions } from './input-format';
+import { InputAudioTrack, InputSubtitleTrack, InputTrack, InputTrackBacking, InputVideoTrack, InputTrackQuery } from './input-track';
+import { PacketRetrievalOptions } from './media-sink';
+import { EventEmitter } from './misc';
+import { Reader } from './reader';
+import { Source, SourceRef, SourceRequest } from './source';
 export declare const DEFAULT_SOURCE_CACHE_GROUP = 1;
 export declare const ENCRYPTION_KEY_CACHE_GROUP = 2;
 /**
@@ -33,6 +34,12 @@ export type InputOptions<S extends Source = Source> = {
     initInput?: Input;
     /** Can be used to specify additional per-format configuration. */
     formatOptions?: InputFormatOptions;
+};
+type SourceCacheEntry = {
+    request: SourceRequest;
+    sourceRef: SourceRef;
+    age: number;
+    cacheGroup: number;
 };
 /**
  * Describes the events that an {@link Input} emits, with each key being an event name and its value being the
@@ -60,6 +67,40 @@ export type InputEvents = {
  * @public
  */
 export declare class Input<S extends Source = Source> extends EventEmitter<InputEvents> implements Disposable {
+    /** @internal */
+    _rootRef: SourceRef<S>;
+    /** @internal */
+    _formats: InputFormat[];
+    /** @internal */
+    _initInput: Input | null;
+    /** @internal */
+    _demuxerPromise: Promise<Demuxer> | null;
+    /** @internal */
+    _format: InputFormat | null;
+    /** @internal */
+    _reader: Reader;
+    /** @internal */
+    _trackBackingsCache: InputTrackBacking[] | null;
+    /** @internal */
+    _backingToTrack: Map<InputTrackBacking, InputTrack>;
+    /** @internal */
+    _disposed: boolean;
+    /** @internal */
+    _nextSourceCacheAge: number;
+    /** @internal */
+    _sourceRefs: SourceRef[];
+    /** @internal */
+    _sourceCache: SourceCacheEntry[];
+    /** @internal */
+    _sourceCachePromises: {
+        request: SourceRequest;
+        cacheGroup: number;
+        promise: Promise<SourceCacheEntry>;
+    }[];
+    /** @internal */
+    _formatOptions: InputFormatOptions;
+    /** @internal */
+    _onFormatDetermined: ((format: InputFormat) => void) | null;
     /** True if the input has been disposed. */
     get disposed(): boolean;
     /**
@@ -67,6 +108,14 @@ export declare class Input<S extends Source = Source> extends EventEmitter<Input
      * called on this instance.
      */
     constructor(options: InputOptions<S>);
+    /** @internal */
+    get _rootSource(): S;
+    /** @internal */
+    _getSourceUncached(request: SourceRequest): Promise<SourceRef<Source>>;
+    /** @internal */
+    _getSourceCached(request: SourceRequest, cacheGroup?: number): Promise<SourceRef>;
+    /** @internal */
+    _getDemuxer(): Promise<Demuxer>;
     /**
      * Returns the source from which this input file reads data for the root path.
      */
@@ -140,6 +189,10 @@ export declare class Input<S extends Source = Source> extends EventEmitter<Input
      * bitrate (higher bitrate is preferred), and if it can be paired with the primary video track.
      */
     getPrimaryAudioTrack(query?: InputTrackQuery<InputAudioTrack>): Promise<InputAudioTrack | null>;
+    /** @internal */
+    _getTrackBackings(): Promise<InputTrackBacking[]>;
+    /** @internal */
+    _wrapBackingAsTrack(backing: InputTrackBacking): InputTrack;
     /** Returns the list of all subtitle tracks of this input file. */
     getSubtitleTracks(): Promise<InputSubtitleTrack[]>;
     /**
@@ -163,7 +216,7 @@ export declare class Input<S extends Source = Source> extends EventEmitter<Input
      * Returns descriptive metadata tags about the media file, such as title, author, date, cover art, or other
      * attached files.
      */
-    getMetadataTags(): Promise<import("./metadata.js").MetadataTags>;
+    getMetadataTags(): Promise<import("./metadata").MetadataTags>;
     /**
      * Disposes this input and frees connected resources. When an input is disposed, ongoing read operations will be
      * canceled, all future read operations will fail, any open decoders will be closed, and all ongoing media sink
@@ -197,4 +250,5 @@ export declare class InputDisposedError extends Error {
     /** Creates a new {@link InputDisposedError}. */
     constructor(message?: string);
 }
+export {};
 //# sourceMappingURL=input.d.ts.map

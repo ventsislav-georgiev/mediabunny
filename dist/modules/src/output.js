@@ -5,12 +5,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import { assert, AsyncMutex, EventEmitter, isIso639Dash2LanguageCode, toArray } from './misc.js';
-import { validateMetadataTags, validateTrackDisposition } from './metadata.js';
-import { OutputFormat } from './output-format.js';
-import { AudioSource, SubtitleSource, VideoSource } from './media-source.js';
-import { PathedTarget, Target } from './target.js';
-import { Writer } from './writer.js';
+import { assert, AsyncMutex, EventEmitter, isIso639Dash2LanguageCode, toArray } from './misc';
+import { validateMetadataTags, validateTrackDisposition } from './metadata';
+import { OutputFormat } from './output-format';
+import { AudioSource, SubtitleSource, VideoSource } from './media-source';
+import { PathedTarget, Target } from './target';
+import { Writer } from './writer';
 /**
  * List of all track types.
  * @group Miscellaneous

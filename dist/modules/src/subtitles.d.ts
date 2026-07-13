@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import type { SubtitleCodec } from './codec.js.js';
+import type { SubtitleCodec } from './codec.js';
 /**
  * Represents a single subtitle cue with timing and text.
  * @group Media sources
@@ -61,6 +61,18 @@ export declare class SubtitleParser {
     private parseTtml;
 }
 /**
+ * Parses a WebVTT timestamp string to milliseconds.
+ * @group Media sources
+ * @internal
+ */
+export declare const parseSubtitleTimestamp: (string: string) => number;
+/**
+ * Formats milliseconds to WebVTT timestamp format.
+ * @group Media sources
+ * @internal
+ */
+export declare const formatSubtitleTimestamp: (timestamp: number) => string;
+/**
  * Parses an SRT timestamp string (HH:MM:SS,mmm) to seconds.
  * @group Media sources
  * @public
@@ -113,6 +125,12 @@ export declare const splitAssIntoCues: (text: string) => {
     header: string;
     cues: SubtitleCue[];
 };
+/**
+ * Converts a full Dialogue/Comment line to MKV block format.
+ * @group Media sources
+ * @internal
+ */
+export declare const convertDialogueLineToMkvFormat: (line: string) => string;
 /**
  * Formats subtitle cues back to ASS/SSA text format with header.
  * Properly inserts Dialogue/Comment lines within [Events] section.

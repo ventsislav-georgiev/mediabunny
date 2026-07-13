@@ -5,10 +5,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import { AudioCodec, MediaCodec, SubtitleCodec, VideoCodec } from './codec.js';
-import { MaybePromise, Rotation } from './misc.js';
-import { EncodedPacket } from './packet.js';
-import { AudioSample, CropRectangle, VideoSample, VideoSampleResource } from './sample.js';
+import { AudioCodec, MediaCodec, SubtitleCodec, VideoCodec } from './codec';
+import { MaybePromise, Rotation } from './misc';
+import { EncodedPacket } from './packet';
+import { AudioSample, CropRectangle, VideoSample, VideoSampleResource } from './sample';
 export declare const canEncodeVideoMemo: Map<string, Promise<boolean>>;
 export declare const canEncodeAudioMemo: Map<string, Promise<boolean>>;
 /**
@@ -248,6 +248,14 @@ export declare const buildAudioEncoderConfig: (options: {
  * @public
  */
 export declare class Quality {
+    /** @internal */
+    _factor: number;
+    /** @internal */
+    constructor(factor: number);
+    /** @internal */
+    _toVideoBitrate(codec: VideoCodec, width: number, height: number): number;
+    /** @internal */
+    _toAudioBitrate(codec: AudioCodec): number | undefined;
 }
 /**
  * Represents a very low media quality.

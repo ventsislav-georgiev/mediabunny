@@ -5,16 +5,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import { Demuxer } from '../demuxer.js';
-import { Input } from '../input.js';
-import { InputAudioTrackBacking } from '../input-track.js';
-import { PacketRetrievalOptions } from '../media-sink.js';
-import { MetadataTags, TrackDisposition } from '../metadata.js';
-import { AsyncMutex } from '../misc.js';
-import { EncodedPacket } from '../packet.js';
-import { Reader } from '../reader.js';
-import { OggCodecInfo } from './ogg-misc.js';
-import { Page } from './ogg-reader.js';
+import { Demuxer } from '../demuxer';
+import { Input } from '../input';
+import { InputAudioTrackBacking } from '../input-track';
+import { PacketRetrievalOptions } from '../media-sink';
+import { MetadataTags, TrackDisposition } from '../metadata';
+import { AsyncMutex } from '../misc';
+import { EncodedPacket } from '../packet';
+import { Reader } from '../reader';
+import { OggCodecInfo } from './ogg-misc';
+import { Page } from './ogg-reader';
 type LogicalBitstream = {
     serialNumber: number;
     bosPage: Page;

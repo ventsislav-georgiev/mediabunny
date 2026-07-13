@@ -5,8 +5,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import { canDecodeAudioMemo, canDecodeVideoMemo } from './decode.js';
-import { canEncodeAudioMemo, canEncodeVideoMemo } from './encode.js';
+import { canDecodeAudioMemo, canDecodeVideoMemo } from './decode';
+import { canEncodeAudioMemo, canEncodeVideoMemo } from './encode';
 /**
  * Base class for custom video decoders. To add your own custom video decoder, extend this class, implement the
  * abstract methods and static `supports` method, and register the decoder using {@link registerDecoder}.

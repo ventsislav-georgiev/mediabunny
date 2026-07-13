@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import { Bitstream } from '../shared/bitstream.js';
+import { Bitstream } from '../shared/bitstream';
 export declare function assert(x: unknown): asserts x;
 /**
  * Represents a clockwise rotation in degrees.
@@ -249,8 +249,15 @@ export type EventListenerOptions = {
  * @public
  */
 export declare class EventEmitter<TEvents extends Record<string, unknown>> {
+    /** @internal */
+    _listeners: Map<keyof TEvents, Set<{
+        fn: (data: never) => unknown;
+        once: boolean;
+    }>>;
     /** Registers a listener for the given event. */
     on<K extends keyof TEvents>(event: K, listener: (data: TEvents[K]) => unknown, options?: EventListenerOptions): () => void;
+    /** @internal */
+    _emit<K extends keyof TEvents>(...args: TEvents[K] extends void ? [event: K] : [event: K, data: TEvents[K]]): void;
 }
 export declare const ceilToMultipleOfTwo: (value: number) => number;
 /**
@@ -261,6 +268,10 @@ export declare const ceilToMultipleOfTwo: (value: number) => number;
  * @public
 */
 export declare class ConcurrentRunner {
+    /** @internal */
+    _queue: Promise<unknown>[];
+    /** @internal */
+    _errored: boolean;
     /**
      * The maximum number of in-flight promises. You can also think of it as the "high water mark".
      * You can set this value to dynamically change the level of parallelism.

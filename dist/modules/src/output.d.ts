@@ -5,11 +5,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import { EventEmitter, MaybePromise, Rotation } from './misc.js';
-import { MetadataTags, TrackDisposition } from './metadata.js';
-import { OutputFormat } from './output-format.js';
-import { AudioSource, MediaSource, SubtitleSource, VideoSource } from './media-source.js';
-import { PathedTarget, Target, TargetRequest } from './target.js';
+import { AsyncMutex, EventEmitter, MaybePromise, Rotation } from './misc';
+import { MetadataTags, TrackDisposition } from './metadata';
+import { Muxer } from './muxer';
+import { OutputFormat } from './output-format';
+import { AudioSource, MediaSource, SubtitleSource, VideoSource } from './media-source';
+import { PathedTarget, Target, TargetRequest } from './target';
+import { Writer } from './writer';
 /**
  * List of all track types.
  * @group Miscellaneous
@@ -28,6 +30,8 @@ export type TrackType = typeof ALL_TRACK_TYPES[number];
  * @public
  */
 export declare abstract class OutputTrack {
+    /** @internal */
+    readonly id: number;
     /** The {@link Output} this track belongs to. */
     readonly output: Output;
     /** The type of this track. */
@@ -36,6 +40,8 @@ export declare abstract class OutputTrack {
     readonly source: MediaSource;
     /** The metadata associated with this track. */
     readonly metadata: BaseTrackMetadata;
+    /** @internal */
+    protected constructor(id: number, output: Output, type: TrackType, source: MediaSource, metadata: BaseTrackMetadata);
     /** Returns true if and only if this track is a video track. */
     isVideoTrack(): this is OutputVideoTrack;
     /** Returns true if and only if this track is an audio track. */
@@ -57,6 +63,8 @@ export declare class OutputVideoTrack extends OutputTrack {
     readonly type: 'video';
     readonly source: VideoSource;
     readonly metadata: VideoTrackMetadata;
+    /** @internal */
+    constructor(id: number, output: Output, source: VideoSource, metadata: VideoTrackMetadata);
 }
 /**
  * An {@link OutputTrack} providing audio data, created using {@link Output.addAudioTrack}.
@@ -67,6 +75,8 @@ export declare class OutputAudioTrack extends OutputTrack {
     readonly type: 'audio';
     readonly source: AudioSource;
     readonly metadata: AudioTrackMetadata;
+    /** @internal */
+    constructor(id: number, output: Output, source: AudioSource, metadata: AudioTrackMetadata);
 }
 /**
  * An {@link OutputTrack} providing subtitle data, created using {@link Output.addSubtitleTrack}.
@@ -77,6 +87,8 @@ export declare class OutputSubtitleTrack extends OutputTrack {
     readonly type: 'subtitle';
     readonly source: SubtitleSource;
     readonly metadata: SubtitleTrackMetadata;
+    /** @internal */
+    constructor(id: number, output: Output, source: SubtitleSource, metadata: SubtitleTrackMetadata);
 }
 /**
  * Used to define pairability between {@link OutputTrack} instances. First create the group, then assign tracks to it
@@ -90,6 +102,8 @@ export declare class OutputSubtitleTrack extends OutputTrack {
  * @public
  */
 export declare class OutputTrackGroup {
+    /** @internal */
+    _pairedGroups: Set<OutputTrackGroup>;
     /** Creates a new {@link OutputTrackGroup}. */
     constructor();
     /**
@@ -225,6 +239,8 @@ export type OutputEvents = {
 export declare class Output<F extends OutputFormat = OutputFormat, T extends Target = Target> extends EventEmitter<OutputEvents> {
     /** The format of the output file. */
     readonly format: F;
+    /** @internal */
+    _target: T | PathedTarget<T>;
     /** The current state of the output. */
     state: 'pending' | 'started' | 'canceled' | 'finalizing' | 'finalized';
     /**
@@ -232,6 +248,39 @@ export declare class Output<F extends OutputFormat = OutputFormat, T extends Tar
      * {@link BaseTrackMetadata.group}.
      */
     readonly defaultTrackGroup: OutputTrackGroup;
+    /** @internal */
+    private _initTarget;
+    /** @internal */
+    _onFinalize: (() => MaybePromise<unknown>) | null;
+    /** @internal */
+    _muxer: Muxer;
+    /** @internal */
+    _unfinalizedTargets: Set<Target>;
+    /** @internal */
+    _rootWriterPromise: Promise<Writer> | null;
+    /** @internal */
+    _tracks: OutputTrack[];
+    /** @internal */
+    _startPromise: Promise<void> | null;
+    /** @internal */
+    _cancelPromise: Promise<void> | null;
+    /** @internal */
+    _finalizePromise: Promise<void> | null;
+    /** @internal */
+    _mutex: AsyncMutex;
+    /** @internal */
+    _metadataTags: MetadataTags;
+    /** @internal */
+    _rootTarget: T | null;
+    /** @internal */
+    _rootTargetPromise: Promise<T> | null;
+    /**
+     * This field is used to synchronize multiple MediaStreamTracks. They use the same time coordinate system across
+     * tracks, and to ensure correct audio-video sync, we must use the same offset for all of them. The reason an offset
+     * is needed at all is because the timestamps typically don't start at zero.
+     * @internal
+     */
+    _firstMediaStreamTimestamp: number | null;
     /**
      * The target to which the root file will be written. Throws when using {@link PathedTarget} with an async callback;
      * prefer the `'target'` event for those cases.
@@ -242,6 +291,20 @@ export declare class Output<F extends OutputFormat = OutputFormat, T extends Tar
      * specified {@link OutputOptions}.
      */
     constructor(options: OutputOptions<F, T>);
+    /** @internal */
+    _getTargetValidated(request: TargetRequest): MaybePromise<T>;
+    /** @internal */
+    _getTarget(request: TargetRequest): Promise<T>;
+    /** @internal */
+    _rememberTarget(target: Target): void;
+    /** @internal */
+    _getInitTarget(): Promise<T>;
+    /** @internal */
+    _hasInitTarget(): boolean;
+    /** @internal */
+    _getRootTarget(): MaybePromise<T>;
+    /** @internal */
+    _getRootWriter(isMonotonic: boolean | ((target: Target) => boolean)): Promise<Writer>;
     /** Adds a video track to the output with the given source. Can only be called before the output is started. */
     addVideoTrack(source: VideoSource, metadata?: VideoTrackMetadata): OutputVideoTrack;
     /** Adds an audio track to the output with the given source. Can only be called before the output is started. */
@@ -255,6 +318,8 @@ export declare class Output<F extends OutputFormat = OutputFormat, T extends Tar
      * Can only be called before the output is started.
      */
     setMetadataTags(tags: MetadataTags): void;
+    /** @internal */
+    private _addTrack;
     /**
      * Starts the creation of the output file. This method should be called after all tracks have been added. Only after
      * the output has started can media samples be added to the tracks.

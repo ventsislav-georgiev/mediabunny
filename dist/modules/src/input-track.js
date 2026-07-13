@@ -5,11 +5,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-import { determineVideoPacketType } from './codec-data.js';
-import { customAudioDecoders, customVideoDecoders } from './custom-coder.js';
-import { EncodedPacketSink } from './media-sink.js';
-import { assert, roundToDivisor, simplifyRational } from './misc.js';
-import { EncodedPacket } from './packet.js';
+import { determineVideoPacketType } from './codec-data';
+import { customAudioDecoders, customVideoDecoders } from './custom-coder';
+import { EncodedPacketSink } from './media-sink';
+import { assert, roundToDivisor, simplifyRational } from './misc';
+import { EncodedPacket } from './packet';
 /**
  * Represents a media track in an input file.
  * @group Input files & tracks
@@ -725,11 +725,11 @@ export class InputSubtitleTrack extends InputTrack {
         const codec = targetFormat || this.codec;
         const codecPrivate = this._backing.getCodecPrivate();
         if (codec === 'srt') {
-            const { formatCuesToSrt } = await import('./subtitles.js');
+            const { formatCuesToSrt } = await import('./subtitles');
             return formatCuesToSrt(cues);
         }
         else if (codec === 'ass' || codec === 'ssa') {
-            const { formatCuesToAss, splitAssIntoCues } = await import('./subtitles.js');
+            const { formatCuesToAss, splitAssIntoCues } = await import('./subtitles');
             // For ASS, we need to merge Comment lines from CodecPrivate with Dialogue lines from blocks
             // CodecPrivate contains: header + Comment lines
             // Blocks contain: Dialogue lines (without timestamps)
@@ -740,13 +740,13 @@ export class InputSubtitleTrack extends InputTrack {
             return formatCuesToAss(cues, parsed.header);
         }
         else if (codec === 'webvtt') {
-            const { formatCuesToWebVTT } = await import('./subtitles.js');
+            const { formatCuesToWebVTT } = await import('./subtitles');
             // Use codecPrivate as preamble if available
             return formatCuesToWebVTT(cues, codecPrivate || undefined);
         }
         else {
             // Fallback to SRT for unknown formats
-            const { formatCuesToSrt } = await import('./subtitles.js');
+            const { formatCuesToSrt } = await import('./subtitles');
             return formatCuesToSrt(cues);
         }
     }
